@@ -308,10 +308,127 @@ def _same_upload_file(a: Any, b: Any) -> bool:
 
 
 def _event_series(df: pd.DataFrame) -> pd.Series:
-    col = _find_col(df, "event_type", "EVENT_TYPE", "EVENT", "Событие")
+    col = _find_col(
+        df,
+        "event_type",
+        "EVENT_TYPE",
+        "EVENT",
+        "EVENTS",
+        "Событие",
+        "СОБЫТИЕ",
+        "ТИП СОБЫТИЯ",
+    )
     if col is None:
         return pd.Series([""] * len(df), index=df.index)
     return df[col].astype(str).str.upper().replace("Ё", "Е").str.strip()
+
+
+def _event_column_name(df: pd.DataFrame) -> Optional[str]:
+    return _find_col(
+        df,
+        "event_type",
+        "EVENT_TYPE",
+        "EVENT",
+        "EVENTS",
+        "Событие",
+        "СОБЫТИЕ",
+        "ТИП СОБЫТИЯ",
+    )
+
+
+def _column_inventory(df: pd.DataFrame, *, limit: int = 35) -> str:
+    cols = [str(c) for c in df.columns]
+    if len(cols) <= limit:
+        return ", ".join(cols) if cols else "(нет колонок)"
+    head = ", ".join(cols[:limit])
+    return f"{head}, … (+{len(cols) - limit})"
+
+
+def _event_value_sample(ev: pd.Series, *, top_n: int = 10) -> str:
+    vals = ev.astype(str).str.strip()
+    vals = vals[~vals.isin(["", "nan", "None", "NaT", "NAT"])]
+    if vals.empty:
+        return "(нет непустых значений — маски отёлов/осеменений дадут 0 строк)"
+    vc = vals.value_counts().head(top_n)
+    parts = [f"{repr(k)}×{int(v)}" for k, v in vc.items()]
+    return ", ".join(parts)
+
+
+def _bundle_slot_summary(bundle: FarmUploadBundle) -> str:
+    def _name(f: Any) -> str:
+        return str(getattr(f, "name", "—") or "—")
+
+    return (
+        f"слоты: отёлы={_name(bundle.calv)}, осеменения={_name(bundle.ins)}, "
+        f"запуск={_name(bundle.dry)}, выбытие={_name(bundle.disp)}, "
+        f"быки={len(bundle.bulls)} файл(ов)"
+    )
+
+
+def _diagnose_events_workbook(filename: str, file_obj: Any) -> str:
+    """Текст для пользователя: почему из файла могло получиться 0 отёлов/осеменений."""
+    lines: list[str] = [f"── {filename}"]
+    kind = _detect_kind(filename)
+    dedicated = _dedicated_file_kind(filename)
+    lines.append(
+        f"   распознавание по имени: kind={kind!r}, dedicated={dedicated!r} "
+        f"(флаги {_filename_event_flags(filename)})"
+    )
+    _rewind(file_obj)
+    try:
+        raw = _raw_excel_from_file(file_obj)
+    except Exception as exc:
+        lines.append(f"   ❌ Excel не прочитан: {exc}")
+        return "\n".join(lines)
+
+    lines.append(f"   строк на листе: {len(raw)}")
+    lines.append(f"   колонки: {_column_inventory(raw)}")
+
+    ev_col = _event_column_name(raw)
+    if ev_col:
+        lines.append(f"   колонка события: «{ev_col}»")
+    else:
+        lines.append(
+            "   колонка события: НЕ НАЙДЕНА "
+            "(ожидаем Event / EVENT / Событие / event_type — иначе нужны отдельные файлы "
+            "«Отелы…», «Осеменения…» в имени)"
+        )
+
+    ev = _event_series(raw)
+    lines.append(f"   примеры Event/Событие: {_event_value_sample(ev)}")
+
+    m_calv, m_ins, m_dry, m_disp = _apply_filename_hint_masks(filename, len(raw), ev)
+    lines.append(
+        f"   строк по маскам в сыром файле: отёлы={int(m_calv.sum())}, "
+        f"осеменения={int(m_ins.sum())}, запуск={int(m_dry.sum())}, выбытие={int(m_disp.sum())}"
+    )
+
+    _rewind(file_obj)
+    parsed = _parse_events_workbook(filename, file_obj)
+    for key, label in (
+        ("calv", "отёлы"),
+        ("ins", "осеменения"),
+        ("dry", "запуск"),
+        ("disp", "выбытие"),
+    ):
+        part = parsed.get(key)
+        n = len(part) if isinstance(part, pd.DataFrame) else 0
+        lines.append(f"   после парсера «{label}»: {n} строк")
+
+    if dedicated and len(raw) and all(
+        len(parsed.get(k, pd.DataFrame())) == 0 for k in ("calv", "ins", "dry", "disp")
+    ):
+        lines.append(
+            "   подсказка: файл с одним типом в имени, но ETL не извлёк строк — "
+            "проверьте REG/DATE (или DREG1/DATE в отёлах) и строку заголовка в Excel."
+        )
+    elif kind == "multi_events" and ev_col and int(m_calv.sum()) == 0 and int(m_ins.sum()) == 0:
+        lines.append(
+            "   подсказка: в Event нет подстрок ОТЕЛ/CALV/BRED/ОСЕМЕН — переименуйте значения "
+            "или загрузите отдельные файлы «Отелы…» и «Осеменения…»."
+        )
+
+    return "\n".join(lines)
 
 
 def _mask_calv_events(ev: pd.Series) -> pd.Series:
@@ -532,9 +649,12 @@ def _parse_dedicated_file(filename: str, file_obj: Any) -> Optional[dict[str, pd
 def _parse_events_workbook(filename: str, file_obj: Any) -> dict[str, pd.DataFrame]:
     """Разнести строки одного Excel по calv / ins / dry / disp."""
     dedicated = _parse_dedicated_file(filename, file_obj)
-    if dedicated is not None:
-        return dedicated
-
+    kind = _dedicated_file_kind(filename)
+    if dedicated is not None and kind is not None:
+        part = dedicated.get(kind)
+        if isinstance(part, pd.DataFrame) and not part.empty:
+            return dedicated
+    _rewind(file_obj)
     out: dict[str, pd.DataFrame] = {
         "calv": _empty_typed_frame("calv"),
         "ins": _empty_typed_frame("ins"),
@@ -762,10 +882,18 @@ def _prepare_tables(bundle: FarmUploadBundle) -> dict[str, pd.DataFrame]:
         ("выбытие", disp_df),
     ) if df.empty]
     if missing:
+        diag_parts = [_bundle_slot_summary(bundle), ""]
+        for f in _unique_bundle_event_files(bundle):
+            _rewind(f)
+            diag_parts.append(_diagnose_events_workbook(getattr(f, "name", "upload.xlsx"), f))
+        diag_text = "\n".join(diag_parts)
         raise ValueError(
             "Не хватает данных после разбора файлов: "
             + ", ".join(missing)
-            + ". Нужна колонка «Событие» / Event или отдельные файлы по типам."
+            + ".\n\nДиагностика (что увидел разборщик):\n"
+            + diag_text
+            + "\n\nНужна колонка Event/Событие с узнаваемыми значениями "
+            "(CALVING, BRED, DRY, …) или отдельные файлы с «Отелы» / «Осеменения» в имени."
         )
 
     calv_df = calv_df.copy()
