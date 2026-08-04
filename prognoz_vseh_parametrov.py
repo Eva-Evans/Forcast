@@ -30,6 +30,26 @@ matplotlib.use("Agg")
 import numpy as np
 import pandas as pd
 
+
+def _setting(name: str, default: str = "") -> str:
+    """Env или Streamlit Cloud Secrets (st.secrets)."""
+    raw = os.environ.get(name)
+    if raw is not None and str(raw).strip():
+        return str(raw).strip()
+    try:
+        import streamlit as st
+
+        if name in st.secrets:
+            return str(st.secrets[name]).strip()
+    except Exception:
+        pass
+    return default
+
+
+def _pipeline_fast_enabled() -> bool:
+    return _setting("PIPELINE_FAST", "1").lower() not in ("0", "false", "no")
+
+
 ROOT = Path(__file__).resolve().parent
 EXTRACTED = ROOT / "finale_pipeline_extracted.py"
 TRAIN_END = pd.Timestamp("2024-09-30")
@@ -259,9 +279,7 @@ class PipelineConfig:
     kaluga_farm: str | None = None
     kaluga_unit: str | None = None
     kaluga_data_dir: Path | None = None
-    fast_train: bool = field(
-        default_factory=lambda: os.environ.get("PIPELINE_FAST", "1").strip() not in ("0", "false", "False")
-    )
+    fast_train: bool = field(default_factory=_pipeline_fast_enabled)
     train_end_ts: pd.Timestamp | None = None
     predict_months: list[tuple[int, int]] | None = None
     month_cols: list[str] | None = None
