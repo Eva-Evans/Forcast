@@ -432,7 +432,7 @@ def _diagnose_events_workbook(filename: str, file_obj: Any) -> str:
 
 
 def _mask_calv_events(ev: pd.Series) -> pd.Series:
-    return ev.str.contains(r"ОТЕЛ|CALV|\bBIRTH\b|BORN|РОЖД", regex=True, na=False)
+    return ev.str.contains(r"ОТЕЛ|CALV|\bBIRTH\b|BORN|РОЖД|\bРОЖД\b", regex=True, na=False)
 
 
 def _mask_ins_events(ev: pd.Series) -> pd.Series:
@@ -742,9 +742,19 @@ def _merge_parsed_parts(parts: dict[str, list[pd.DataFrame]], key: str) -> pd.Da
     return pd.concat(frames, ignore_index=True, sort=False)
 
 
-def _assign_multi_event_file(bundle: FarmUploadBundle, f: Any) -> bool:
-    """True если заменили уже загруженные слоты."""
-    replaced = any(x is not None for x in (bundle.calv, bundle.ins, bundle.dry, bundle.disp))
+def _assign_multi_event_file(bundle: FarmUploadBundle, f: Any, filename: str) -> bool:
+    """Назначить файл в слоты. «Выбытие + Запуск» — только dry/disp, не затирать отёлы/осеменения."""
+    flags = _filename_event_flags(filename)
+    replaced = False
+    if (flags["dry"] or flags["disp"]) and not flags["calv"] and not flags["ins"]:
+        if bundle.dry is not None or bundle.disp is not None:
+            replaced = True
+        bundle.dry = f
+        bundle.disp = f
+        return replaced
+
+    if any(x is not None for x in (bundle.calv, bundle.ins, bundle.dry, bundle.disp)):
+        replaced = True
     bundle.calv = f
     bundle.ins = f
     bundle.dry = f
@@ -803,7 +813,7 @@ def _group_files(files: list[Any]) -> tuple[dict[str, FarmUploadBundle], pd.Data
                 status = "заменён (последний файл)"
             b.disp = f
         elif kind == "multi_events":
-            if _assign_multi_event_file(b, f):
+            if _assign_multi_event_file(b, f, f.name):
                 status = "заменён (последний файл)"
             else:
                 status = "ok (несколько типов событий в одном файле)"
