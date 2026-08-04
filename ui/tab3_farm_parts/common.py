@@ -461,8 +461,80 @@ def _apply_filename_hint_masks(
     return m_calv, m_ins, m_dry, m_disp
 
 
+def _dedicated_file_kind(filename: str) -> Optional[str]:
+    """Один тип события по имени файла — читаем целиком через ETL, без фильтра «Событие»."""
+    kind = _detect_kind(filename)
+    if kind == "multi_events":
+        flags = _filename_event_flags(filename)
+        if flags["dry"] and flags["disp"] and not flags["calv"] and not flags["ins"]:
+            return None
+        return None
+    flags = _filename_event_flags(filename)
+    if sum(flags.values()) == 1:
+        return next(k for k, v in flags.items() if v)
+    if kind in ("calv", "ins", "dry", "disp"):
+        return kind
+    return None
+
+
+def _parse_dedicated_file(filename: str, file_obj: Any) -> Optional[dict[str, pd.DataFrame]]:
+    kind = _dedicated_file_kind(filename)
+    if kind is None:
+        return None
+    empty = {
+        "calv": _empty_typed_frame("calv"),
+        "ins": _empty_typed_frame("ins"),
+        "dry": _empty_typed_frame("dry"),
+        "disp": _empty_typed_frame("disp"),
+    }
+    _rewind(file_obj)
+    try:
+        if kind == "calv":
+            try:
+                df = read_calvings_excel(file_obj, include_meta=True)
+            except Exception:
+                _rewind(file_obj)
+                df = _fallback_calvings(_raw_excel_from_file(file_obj))
+            empty["calv"] = df
+            return empty
+        if kind == "ins":
+            try:
+                df = clean_inseminations(read_inseminations_excel(file_obj, include_meta=True))
+            except Exception:
+                _rewind(file_obj)
+                df = _fallback_inseminations(_raw_excel_from_file(file_obj))
+            empty["ins"] = df
+            return empty
+        if kind == "dry":
+            try:
+                df = read_dryoff_excel(file_obj, include_meta=True)
+            except Exception:
+                _rewind(file_obj)
+                df = _fallback_dryoff(_raw_excel_from_file(file_obj))
+            df = df.copy()
+            if "move_reason" not in df.columns and "disposal_reason" in df.columns:
+                df["move_reason"] = df["disposal_reason"]
+            empty["dry"] = df
+            return empty
+        if kind == "disp":
+            try:
+                df = read_disposals_excel(file_obj, include_meta=True)
+            except Exception:
+                _rewind(file_obj)
+                df = _fallback_disposals(_raw_excel_from_file(file_obj))
+            empty["disp"] = df
+            return empty
+    except Exception:
+        return None
+    return None
+
+
 def _parse_events_workbook(filename: str, file_obj: Any) -> dict[str, pd.DataFrame]:
     """Разнести строки одного Excel по calv / ins / dry / disp."""
+    dedicated = _parse_dedicated_file(filename, file_obj)
+    if dedicated is not None:
+        return dedicated
+
     out: dict[str, pd.DataFrame] = {
         "calv": _empty_typed_frame("calv"),
         "ins": _empty_typed_frame("ins"),
@@ -478,6 +550,16 @@ def _parse_events_workbook(filename: str, file_obj: Any) -> dict[str, pd.DataFra
 
     ev = _event_series(raw)
     m_calv, m_ins, m_dry, m_disp = _apply_filename_hint_masks(filename, len(raw), ev)
+
+    if not (m_calv.any() or m_ins.any() or m_dry.any() or m_disp.any()):
+        blank = pd.Series([""] * len(raw), index=raw.index)
+        m_calv, m_ins, m_dry, m_disp = _apply_filename_hint_masks(filename, len(raw), blank)
+
+    hint = _dedicated_file_kind(filename)
+    if hint == "calv" and len(raw) and not m_calv.any():
+        m_calv = pd.Series(True, index=raw.index)
+    elif hint == "ins" and len(raw) and not m_ins.any():
+        m_ins = pd.Series(True, index=raw.index)
 
     overlap = (m_calv.astype(int) + m_ins.astype(int) + m_dry.astype(int) + m_disp.astype(int)) > 1
     if overlap.any():
@@ -719,6 +801,8 @@ def _prepare_tables(bundle: FarmUploadBundle) -> dict[str, pd.DataFrame]:
     dry_df["event_date"] = pd.to_datetime(dry_df["event_date"], errors="coerce", dayfirst=True)
     if "move_reason" not in dry_df.columns:
         dry_df["move_reason"] = ""
+    if dry_df["move_reason"].astype(str).str.strip().eq("").all() and "disposal_reason" in dry_df.columns:
+        dry_df["move_reason"] = dry_df["disposal_reason"].astype(str)
 
     disp_df = disp_df.copy()
     for c in ("reg", "event_date", "disposal_reason", "__farm", "__subdivision"):
