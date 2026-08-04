@@ -1,0 +1,8 @@
+[server]
+headless = true
+# Finál + XGB can run 30–60+ minutes; increase if your host allows it
+maxUploadSize = 500
+enableXsrfProtection = true
+
+[browser]
+gatherUsageStats = false

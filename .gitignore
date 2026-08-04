@@ -1,0 +1,20 @@
+.venv/
+__pycache__/
+*.py[cod]
+.DS_Store
+*.log
+.pipeline_runtime/
+.pipeline_runtime_verify/
+.pipeline_*.log
+
+# Local DB dump (use Postgres in Docker / cloud)
+herd_data.db
+*.db
+
+# Streamlit / IDE
+.streamlit/secrets.toml
+.idea/
+.vscode/
+
+# Pipeline outputs (generated at runtime)
+.pipeline_runtime/**
