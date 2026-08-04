@@ -39,6 +39,65 @@ def _build_dsn_from_supabase_parts() -> str | None:
     port = _secrets_get("SUPABASE_DB_PORT") or _secrets_get("DB_PORT") or "5432"
     if not host or not password:
         return None
+    password = _strip_wrapping_brackets(password)
+    return (
+        f"postgresql+psycopg2://{quote_plus(user)}:{quote_plus(password)}"
+        f"@{host}:{port}/{quote_plus(database)}?sslmode=require"
+    )
+
+
+def _strip_wrapping_brackets(password: str) -> str:
+    p = password.strip()
+    if len(p) >= 2 and p.startswith("[") and p.endswith("]"):
+        return p[1:-1]
+    return p
+
+
+def _fix_bracket_password_in_dsn(dsn: str) -> str:
+    """Supabase docs sometimes show [password]; in URL скобки ломают парсер и auth."""
+    return re.sub(
+        r":\[([^\]]+)\]@",
+        lambda m: f":{quote_plus(m.group(1))}@",
+        dsn,
+        count=1,
+    )
+
+
+def _manual_rebuild_dsn(dsn: str) -> str | None:
+    """Fallback, если make_url падает (скобки, @ в пароле)."""
+    for prefix in ("postgresql+psycopg2://", "postgresql://", "postgres://"):
+        if dsn.startswith(prefix):
+            rest = dsn[len(prefix) :]
+            break
+    else:
+        return None
+    at = rest.rfind("@")
+    if at <= 0:
+        return None
+    userinfo, hostpart = rest[:at], rest[at + 1 :]
+    if "/" in hostpart:
+        hostport, db_and_q = hostpart.split("/", 1)
+    else:
+        hostport, db_and_q = hostpart, "postgres"
+    if "?" in db_and_q:
+        database, _query = db_and_q.split("?", 1)
+    else:
+        database, _query = db_and_q, ""
+    if ":" in userinfo:
+        user, password = userinfo.split(":", 1)
+    else:
+        user, password = userinfo, ""
+    password = _strip_wrapping_brackets(password)
+    user = _strip_wrapping_brackets(user) if user.startswith("[") else user
+    host = hostport
+    port = "5432"
+    if hostport.startswith("[") and "]" in hostport:
+        host = hostport[1 : hostport.index("]")]
+        tail = hostport[hostport.index("]") + 1 :]
+        if tail.startswith(":"):
+            port = tail[1:]
+    elif ":" in hostport:
+        host, port = hostport.rsplit(":", 1)
     return (
         f"postgresql+psycopg2://{quote_plus(user)}:{quote_plus(password)}"
         f"@{host}:{port}/{quote_plus(database)}?sslmode=require"
@@ -47,6 +106,7 @@ def _build_dsn_from_supabase_parts() -> str | None:
 
 def normalize_postgres_dsn(dsn: str) -> str:
     dsn = dsn.strip().strip('"').strip("'")
+    dsn = _fix_bracket_password_in_dsn(dsn)
     if _dsn_is_placeholder(dsn):
         raise ValueError(
             "В Secrets в POSTGRES_DSN остался шаблон [YOUR-PASSWORD]. "
@@ -70,11 +130,14 @@ def normalize_postgres_dsn(dsn: str) -> str:
 
     try:
         url = make_url(dsn)
-    except Exception as exc:
-        raise ValueError(
-            "Не удалось разобрать POSTGRES_DSN (часто ломают спецсимволы в пароле @ # [ ]). "
-            "Задайте отдельно SUPABASE_DB_HOST и SUPABASE_DB_PASSWORD в Secrets — так надёжнее."
-        ) from exc
+    except Exception:
+        rebuilt = _manual_rebuild_dsn(dsn)
+        if not rebuilt:
+            raise ValueError(
+                "Не удалось разобрать POSTGRES_DSN. Уберите [ ] вокруг пароля или задайте "
+                "SUPABASE_DB_HOST + SUPABASE_DB_PASSWORD в Secrets."
+            )
+        url = make_url(rebuilt)
 
     host = (url.host or "").lower()
     if "supabase.co" in host:
