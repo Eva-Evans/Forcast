@@ -12,7 +12,7 @@ import streamlit as st
 
 from etl.bulls import read_bulls_txt
 from etl.calvings_births import read_calvings_excel
-from etl.disposals import read_disposals_excel
+from etl.disposals import _as_excel_source, _read_excel_best_header, read_disposals_excel
 from etl.dryoff import read_dryoff_excel
 from etl.inseminations import clean_inseminations, read_inseminations_excel
 
@@ -265,19 +265,290 @@ def _fallback_dryoff(df_raw: pd.DataFrame) -> pd.DataFrame:
         }
     )
 
+def _filename_event_flags(filename: str) -> dict[str, bool]:
+    n = filename.upper().replace("Ё", "Е")
+    return {
+        "calv": any(x in n for x in ("ОТЕЛ", "ОТЁЛ", "РОДИВ", "CALV", "BIRTH", "BORN")),
+        "ins": any(x in n for x in ("ОСЕМЕН", "INSEM")),
+        "dry": any(x in n for x in ("ЗАПУСК", "DRY", "DRYOFF")),
+        "disp": any(x in n for x in ("ВЫБЫТИ", "DISPOS")),
+    }
+
+
 def _detect_kind(filename: str) -> Optional[str]:
     n = filename.upper().replace("Ё", "Е")
-    if any(x in n for x in ("ОСЕМЕН", "INSEM")):
-        return "ins"
-    if any(x in n for x in ("ОТЕЛ", "ОТЁЛ", "РОДИВ", "CALV", "BIRTH", "BORN")):
-        return "calv"
-    if any(x in n for x in ("ЗАПУСК", "DRY")):
-        return "dry"
-    if any(x in n for x in ("ВЫБЫТИ", "DISPOS")):
-        return "disp"
-    if any(x in n for x in ("БЫК", "BULL")):
+    if any(x in n for x in ("БЫК", "BULL")) and not any(
+        x in n for x in ("ОСЕМЕН", "ОТЕЛ", "ОТЁЛ", "РОДИВ", "ЗАПУСК", "ВЫБЫТИ", "CALV", "INSEM", "DISPOS")
+    ):
         return "bulls"
+    flags = _filename_event_flags(filename)
+    n_types = sum(flags.values())
+    if n_types >= 2:
+        return "multi_events"
+    if flags["calv"]:
+        return "calv"
+    if flags["ins"]:
+        return "ins"
+    if flags["dry"]:
+        return "dry"
+    if flags["disp"]:
+        return "disp"
+    low = filename.lower()
+    if low.endswith((".xlsx", ".xls", ".xlsm")):
+        return "multi_events"
     return None
+
+
+def _same_upload_file(a: Any, b: Any) -> bool:
+    if a is b:
+        return True
+    if a is None or b is None:
+        return False
+    return getattr(a, "name", None) == getattr(b, "name", None)
+
+
+def _event_series(df: pd.DataFrame) -> pd.Series:
+    col = _find_col(df, "event_type", "EVENT_TYPE", "EVENT", "Событие")
+    if col is None:
+        return pd.Series([""] * len(df), index=df.index)
+    return df[col].astype(str).str.upper().replace("Ё", "Е").str.strip()
+
+
+def _mask_calv_events(ev: pd.Series) -> pd.Series:
+    return ev.str.contains(r"ОТЕЛ|CALV|\bBIRTH\b|BORN|РОЖД", regex=True, na=False)
+
+
+def _mask_ins_events(ev: pd.Series) -> pd.Series:
+    return ev.str.contains(r"ОСЕМЕН|INSEM|\bBRED\b", regex=True, na=False)
+
+
+def _mask_dry_events(ev: pd.Series) -> pd.Series:
+    return ev.str.contains(r"ЗАПУСК|\bDRY\b|DRYOFF", regex=True, na=False)
+
+
+def _mask_disp_events(ev: pd.Series) -> pd.Series:
+    return ev.str.contains(r"ВЫБЫТ|DISPOS|\bSOLD\b|ПРОДАН", regex=True, na=False)
+
+
+def _read_combined_dry_disp_excel(file_obj: Any) -> pd.DataFrame:
+    _rewind(file_obj)
+    try:
+        return read_disposals_excel(file_obj, include_meta=True)
+    except Exception:
+        _rewind(file_obj)
+        return read_dryoff_excel(file_obj, include_meta=True)
+
+
+def _split_dry_disp_frames(full: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Один Excel «Запуск + Выбытие»: делим по колонке события."""
+    if full is None or full.empty:
+        empty_dry = pd.DataFrame(columns=["reg", "dim", "event_date", "move_reason", "__farm", "__subdivision"])
+        empty_disp = pd.DataFrame(columns=["reg", "event_date", "disposal_reason", "__farm", "__subdivision"])
+        return empty_dry, empty_disp
+
+    work = full.copy()
+    ev = _event_series(work)
+    m_dry = _mask_dry_events(ev)
+    m_disp = _mask_disp_events(ev)
+    if not m_dry.any() and not m_disp.any():
+        m_disp = pd.Series([True] * len(work), index=work.index)
+
+    dry_src = work[m_dry].copy() if m_dry.any() else work.iloc[0:0].copy()
+    disp_src = work[m_disp].copy() if m_disp.any() else work.iloc[0:0].copy()
+
+    for c in ("reg", "event_date", "__farm", "__subdivision"):
+        if c not in dry_src.columns:
+            dry_src[c] = pd.NA
+        if c not in disp_src.columns:
+            disp_src[c] = pd.NA
+
+    dim_col = "dim" if "dim" in dry_src.columns else None
+    if dim_col is None and "age_dim" in dry_src.columns:
+        dry_src["dim"] = pd.to_numeric(dry_src["age_dim"], errors="coerce")
+    elif "dim" not in dry_src.columns:
+        dry_src["dim"] = pd.NA
+
+    reason_d = None
+    for c in ("disposal_reason", "remark", "note"):
+        if c in dry_src.columns:
+            reason_d = dry_src[c].astype(str)
+            break
+    dry_out = pd.DataFrame(
+        {
+            "reg": dry_src["reg"].map(_norm_id),
+            "dim": pd.to_numeric(dry_src.get("dim"), errors="coerce"),
+            "event_date": pd.to_datetime(dry_src["event_date"], errors="coerce", dayfirst=True),
+            "move_reason": reason_d if reason_d is not None else "",
+            "__farm": dry_src["__farm"],
+            "__subdivision": dry_src["__subdivision"],
+        }
+    )
+
+    reason_x = None
+    for c in ("disposal_reason", "remark", "note"):
+        if c in disp_src.columns:
+            reason_x = disp_src[c].astype(str).str.strip()
+            break
+    disp_out = pd.DataFrame(
+        {
+            "reg": disp_src["reg"].map(_norm_id),
+            "event_date": pd.to_datetime(disp_src["event_date"], errors="coerce", dayfirst=True),
+            "disposal_reason": reason_x if reason_x is not None else "",
+            "__farm": disp_src["__farm"],
+            "__subdivision": disp_src["__subdivision"],
+        }
+    )
+    return dry_out, disp_out
+
+
+def _raw_excel_from_file(file_obj: Any) -> pd.DataFrame:
+    _rewind(file_obj)
+    return _read_excel_best_header(_as_excel_source(file_obj), max_header=25)
+
+
+def _read_normalized_events_table(file_obj: Any) -> pd.DataFrame:
+    for reader in (
+        read_disposals_excel,
+        read_dryoff_excel,
+        read_inseminations_excel,
+        read_calvings_excel,
+    ):
+        _rewind(file_obj)
+        try:
+            return reader(file_obj, include_meta=True)
+        except Exception:
+            continue
+    raw = _raw_excel_from_file(file_obj)
+    return raw.rename(columns={c: str(c).strip() for c in raw.columns})
+
+
+def _empty_typed_frame(kind: str) -> pd.DataFrame:
+    cols = {
+        "calv": ["reg", "mother_reg", "birth_date", "sex", "event_type", "event_date", "__farm", "__subdivision"],
+        "ins": ["reg", "lact", "dim_age", "event_date", "bull", "result", "__farm", "__subdivision"],
+        "dry": ["reg", "dim", "event_date", "move_reason", "__farm", "__subdivision"],
+        "disp": ["reg", "event_date", "disposal_reason", "__farm", "__subdivision"],
+    }
+    return pd.DataFrame(columns=cols[kind])
+
+
+def _apply_filename_hint_masks(
+    filename: str, n_rows: int, ev: pd.Series
+) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
+    idx = ev.index
+    z = pd.Series([False] * n_rows, index=idx)
+    m_calv, m_ins, m_dry, m_disp = z.copy(), z.copy(), z.copy(), z.copy()
+    if ev.astype(str).str.strip().ne("").any():
+        m_calv = _mask_calv_events(ev)
+        m_ins = _mask_ins_events(ev)
+        m_dry = _mask_dry_events(ev)
+        m_disp = _mask_disp_events(ev)
+        return m_calv, m_ins, m_dry, m_disp
+
+    flags = _filename_event_flags(filename)
+    kind = _detect_kind(filename)
+    if kind == "multi_events" or sum(flags.values()) >= 2:
+        all_rows = pd.Series([True] * n_rows, index=idx)
+        return all_rows, all_rows, all_rows, all_rows
+    if kind == "calv" or flags["calv"]:
+        m_calv = pd.Series([True] * n_rows, index=idx)
+    elif kind == "ins" or flags["ins"]:
+        m_ins = pd.Series([True] * n_rows, index=idx)
+    elif kind == "dry" or flags["dry"]:
+        m_dry = pd.Series([True] * n_rows, index=idx)
+    elif kind == "disp" or flags["disp"]:
+        m_disp = pd.Series([True] * n_rows, index=idx)
+    return m_calv, m_ins, m_dry, m_disp
+
+
+def _parse_events_workbook(filename: str, file_obj: Any) -> dict[str, pd.DataFrame]:
+    """Разнести строки одного Excel по calv / ins / dry / disp."""
+    out: dict[str, pd.DataFrame] = {
+        "calv": _empty_typed_frame("calv"),
+        "ins": _empty_typed_frame("ins"),
+        "dry": _empty_typed_frame("dry"),
+        "disp": _empty_typed_frame("disp"),
+    }
+    try:
+        raw = _raw_excel_from_file(file_obj)
+    except Exception:
+        return out
+    if raw.empty:
+        return out
+
+    ev = _event_series(raw)
+    m_calv, m_ins, m_dry, m_disp = _apply_filename_hint_masks(filename, len(raw), ev)
+
+    overlap = (m_calv.astype(int) + m_ins.astype(int) + m_dry.astype(int) + m_disp.astype(int)) > 1
+    if overlap.any():
+        m_calv &= ~overlap
+        m_ins &= ~overlap
+        m_dry &= ~overlap
+        m_disp &= ~overlap
+
+    if m_calv.any():
+        try:
+            out["calv"] = _fallback_calvings(raw.loc[m_calv].copy())
+        except Exception:
+            pass
+    if m_ins.any():
+        try:
+            out["ins"] = _fallback_inseminations(raw.loc[m_ins].copy())
+        except Exception:
+            pass
+
+    if m_dry.any() or m_disp.any():
+        try:
+            norm = _read_normalized_events_table(file_obj)
+            nev = _event_series(norm)
+            if nev.astype(str).str.strip().ne("").any():
+                md = _mask_dry_events(nev)
+                mp = _mask_disp_events(nev)
+            else:
+                _, _, md, mp = _apply_filename_hint_masks(filename, len(norm), nev)
+            subset = norm.loc[md | mp].copy()
+            if not subset.empty:
+                dry_df, disp_df = _split_dry_disp_frames(subset)
+                if md.any():
+                    out["dry"] = dry_df
+                if mp.any():
+                    out["disp"] = disp_df
+        except Exception:
+            pass
+
+    return out
+
+
+def _unique_bundle_event_files(bundle: FarmUploadBundle) -> list[Any]:
+    seen: set[int] = set()
+    uniq: list[Any] = []
+    for f in (bundle.calv, bundle.ins, bundle.dry, bundle.disp):
+        if f is None:
+            continue
+        fid = id(f)
+        if fid in seen:
+            continue
+        seen.add(fid)
+        uniq.append(f)
+    return uniq
+
+
+def _merge_parsed_parts(parts: dict[str, list[pd.DataFrame]], key: str) -> pd.DataFrame:
+    frames = [df for df in parts.get(key, []) if isinstance(df, pd.DataFrame) and not df.empty]
+    if not frames:
+        return _empty_typed_frame(key)
+    return pd.concat(frames, ignore_index=True, sort=False)
+
+
+def _assign_multi_event_file(bundle: FarmUploadBundle, f: Any) -> bool:
+    """True если заменили уже загруженные слоты."""
+    replaced = any(x is not None for x in (bundle.calv, bundle.ins, bundle.dry, bundle.disp))
+    bundle.calv = f
+    bundle.ins = f
+    bundle.dry = f
+    bundle.disp = f
+    return replaced
+
 
 def _extract_farm_name(filename: str, kind: str) -> str:
     stem = re.sub(r"\.[^.]+$", "", filename, flags=re.IGNORECASE)
@@ -297,6 +568,7 @@ def _extract_farm_name(filename: str, kind: str) -> str:
 
     name = " ".join(out).strip()
     return name or "ХОЗЯЙСТВО_1"
+
 
 def _group_files(files: list[Any]) -> tuple[dict[str, FarmUploadBundle], pd.DataFrame]:
     bundles: dict[str, FarmUploadBundle] = {}
@@ -328,6 +600,12 @@ def _group_files(files: list[Any]) -> tuple[dict[str, FarmUploadBundle], pd.Data
             if b.disp is not None:
                 status = "заменён (последний файл)"
             b.disp = f
+        elif kind == "multi_events":
+            if _assign_multi_event_file(b, f):
+                status = "заменён (последний файл)"
+            else:
+                status = "ok (несколько типов событий в одном файле)"
+            kind = "all-events"
         else:
             b.bulls.append(f)
 
@@ -379,15 +657,34 @@ def _merge_aux_bull_bundles(
     return merged, attached
 
 def _prepare_tables(bundle: FarmUploadBundle) -> dict[str, pd.DataFrame]:
-    if bundle.calv is None or bundle.ins is None or bundle.dry is None or bundle.disp is None:
-        raise ValueError("Нужны 4 файла: отёлы, осеменения, запуски, выбытие.")
+    if not _unique_bundle_event_files(bundle):
+        raise ValueError("Нужны Excel с событиями (отёлы, осеменения, запуск, выбытие — отдельно или в одном файле).")
 
-    _rewind(bundle.calv)
-    try:
-        calv_df = read_calvings_excel(bundle.calv, include_meta=True)
-    except Exception:
-        _rewind(bundle.calv)
-        calv_df = _fallback_calvings(pd.read_excel(bundle.calv))
+    collected: dict[str, list[pd.DataFrame]] = {k: [] for k in ("calv", "ins", "dry", "disp")}
+    for f in _unique_bundle_event_files(bundle):
+        parsed = _parse_events_workbook(getattr(f, "name", "upload.xlsx"), f)
+        for key in collected:
+            df = parsed.get(key)
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                collected[key].append(df)
+
+    calv_df = _merge_parsed_parts(collected, "calv")
+    ins_df = _merge_parsed_parts(collected, "ins")
+    dry_df = _merge_parsed_parts(collected, "dry")
+    disp_df = _merge_parsed_parts(collected, "disp")
+
+    missing = [label for label, df in (
+        ("отёлы", calv_df),
+        ("осеменения", ins_df),
+        ("запуски", dry_df),
+        ("выбытие", disp_df),
+    ) if df.empty]
+    if missing:
+        raise ValueError(
+            "Не хватает данных после разбора файлов: "
+            + ", ".join(missing)
+            + ". Нужна колонка «Событие» или отдельные файлы по типам."
+        )
 
     calv_df = calv_df.copy()
     for c in ("reg", "mother_reg", "birth_date", "sex", "event_type", "event_date", "__farm", "__subdivision"):
@@ -399,13 +696,8 @@ def _prepare_tables(bundle: FarmUploadBundle) -> dict[str, pd.DataFrame]:
     calv_df["event_date"] = pd.to_datetime(calv_df["event_date"], errors="coerce", dayfirst=True)
     calv_df["sex"] = calv_df["sex"].map(_norm_sex)
     calv_df["event_type"] = calv_df["event_type"].map(_norm_event_type)
-
-    _rewind(bundle.ins)
-    try:
-        ins_df = clean_inseminations(read_inseminations_excel(bundle.ins, include_meta=True))
-    except Exception:
-        _rewind(bundle.ins)
-        ins_df = _fallback_inseminations(pd.read_excel(bundle.ins))
+    if "lact" not in calv_df.columns:
+        calv_df["lact"] = pd.NA
 
     ins_df = ins_df.copy()
     for c in ("reg", "lact", "dim_age", "event_date", "bull", "result", "__farm", "__subdivision"):
@@ -418,28 +710,15 @@ def _prepare_tables(bundle: FarmUploadBundle) -> dict[str, pd.DataFrame]:
     ins_df["bull"] = ins_df["bull"].map(_norm_id)
     ins_df["result"] = ins_df["result"].astype(str).str.strip()
 
-    _rewind(bundle.dry)
-    try:
-        dry_df = read_dryoff_excel(bundle.dry, include_meta=True)
-    except Exception:
-        _rewind(bundle.dry)
-        dry_df = _fallback_dryoff(pd.read_excel(bundle.dry))
-
     dry_df = dry_df.copy()
-    for c in ("reg", "dim", "event_date", "disposal_reason", "__farm", "__subdivision"):
+    for c in ("reg", "dim", "event_date", "move_reason", "__farm", "__subdivision"):
         if c not in dry_df.columns:
             dry_df[c] = pd.NA
     dry_df["reg"] = dry_df["reg"].map(_norm_id)
     dry_df["dim"] = pd.to_numeric(dry_df["dim"], errors="coerce")
     dry_df["event_date"] = pd.to_datetime(dry_df["event_date"], errors="coerce", dayfirst=True)
-    dry_df["move_reason"] = dry_df["disposal_reason"].astype(str).str.replace("\u00a0", " ", regex=False).str.strip()
-
-    _rewind(bundle.disp)
-    try:
-        disp_df = read_disposals_excel(bundle.disp, include_meta=True)
-    except Exception:
-        _rewind(bundle.disp)
-        disp_df = _fallback_disposals(pd.read_excel(bundle.disp))
+    if "move_reason" not in dry_df.columns:
+        dry_df["move_reason"] = ""
 
     disp_df = disp_df.copy()
     for c in ("reg", "event_date", "disposal_reason", "__farm", "__subdivision"):
@@ -447,6 +726,11 @@ def _prepare_tables(bundle: FarmUploadBundle) -> dict[str, pd.DataFrame]:
             disp_df[c] = pd.NA
     disp_df["reg"] = disp_df["reg"].map(_norm_id)
     disp_df["event_date"] = pd.to_datetime(disp_df["event_date"], errors="coerce", dayfirst=True)
+
+    try:
+        ins_df = clean_inseminations(ins_df)
+    except Exception:
+        pass
 
     bulls_frames: list[pd.DataFrame] = []
     for bf in bundle.bulls:
