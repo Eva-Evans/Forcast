@@ -140,7 +140,7 @@ def normalize_postgres_dsn(dsn: str) -> str:
         url = make_url(rebuilt)
 
     host = (url.host or "").lower()
-    if "supabase.co" in host:
+    if "supabase.co" in host or "pooler.supabase.com" in host:
         q = dict(url.query) if url.query else {}
         if q.get("sslmode") != "require":
             url = url.update_query_dict({"sslmode": "require"})

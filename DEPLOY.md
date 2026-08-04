@@ -129,27 +129,30 @@ make rev  # down -v (с wipe БД) и up --build
 1. Зайдите на [share.streamlit.io](https://share.streamlit.io) под GitHub-аккаунтом с доступом к репо.
 2. **New app** → Repository `Eva-Evans/Forcast`, branch `main`, **Main file path** `app.py`.
 3. **Advanced settings** → Python 3.11 (как в Dockerfile; 3.10+ обычно OK).
-4. **Secrets** (TOML) — для **Supabase** обязательно драйвер и SSL:
+4. **Secrets** — для **Streamlit Cloud + Supabase** не используйте прямой хост `db.xxxx.supabase.co`: у него часто **только IPv6**, и у Streamlit Cloud DNS падает с *«No address associated with hostname»*.
+
+   В Supabase: **Connect** (или Settings → Database) → **Connection string** → режим **Session pooler** (IPv4, порт **5432**). Скопируйте URI и приведите к виду:
 
 ```toml
-# Пароль — реальный из Supabase → Settings → Database (не плейсхолдер [YOUR-PASSWORD]).
-# Спецсимволы в пароле (@ # % и т.д.) лучше URL-кодировать или задать новый пароль без них.
-POSTGRES_DSN = "postgresql+psycopg2://postgres:ВАШ_ПАРОЛЬ@db.xxxxx.supabase.co:5432/postgres?sslmode=require"
-
+# Пример (подставьте СВОИ host, user, пароль из Dashboard — без [ ] вокруг пароля):
+POSTGRES_DSN = "postgresql+psycopg2://postgres.ВАШ_PROJECT_REF:ПАРОЛЬ@aws-0-eu-central-1.pooler.supabase.com:5432/postgres?sslmode=require"
 ADMIN_KEY = "supersecret123"
-USE_FINAL_PIPELINE = "1"
 ```
 
-Альтернатива (отдельные поля — подхватит `config.py`):
+   Обратите внимание: в pooler логин часто **`postgres.abc123projectref`**, а не просто `postgres`.
+
+   Альтернатива — отдельные поля (пароль можно без URL-кодирования):
 
 ```toml
-SUPABASE_DB_HOST = "db.xxxxx.supabase.co"
-SUPABASE_DB_PASSWORD = "ВАШ_ПАРОЛЬ"
-SUPABASE_DB_USER = "postgres"
+SUPABASE_DB_HOST = "aws-0-eu-central-1.pooler.supabase.com"
+SUPABASE_DB_USER = "postgres.ajrykokvrirtrsorqibn"
+SUPABASE_DB_PASSWORD = "ваш_пароль"
 SUPABASE_DB_NAME = "postgres"
 SUPABASE_DB_PORT = "5432"
 ADMIN_KEY = "supersecret123"
 ```
+
+   Если проект на **pause** (Free tier) — в Dashboard нажмите **Restore project**, иначе хост не резолвится.
 
 5. В Supabase → **SQL Editor** выполните скрипт **`db/init.sql`** из репозитория (создаст `calvings_births_raw`, …). Без этого загрузка может падать на других ошибках.
 
@@ -249,7 +252,7 @@ python scripts/verify_pipeline_ref_data.py                 # эталон на �
 | `Conflict … container name "/herd-db"` | `docker compose down`, удалите старый контейнер или `docker rm -f herd-db herd-app`. |
 | Подразделение «(нет данных)» | Загрузите полный комплект на вкладке «Загрузка данных». |
 | Долго «крутится» без таблицы | Нормально для finál; смотрите `docker compose logs -f app`. |
-| Ошибка на `ключ_коровы` | Обновите код с GitHub (исправлено в `tab3_to_final` / `normalize_events_df`). |
+| `could not translate host name "db....supabase.co"` | Streamlit Cloud не резолвит **прямой** IPv6-хост. В Secrets укажите **Session pooler** (`aws-0-….pooler.supabase.com:5432`, user `postgres.projectref`). |
 
 ---
 
