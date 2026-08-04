@@ -114,7 +114,7 @@ def _tab3_dry_disp_to_source(dry: pd.DataFrame, disp: pd.DataFrame) -> pd.DataFr
                 "Event": ev,
                 "Событие": ev,
                 "REM": reason,
-                "Кuda": reason,
+                "Куда": reason,
             }
         )
         block["тип_файла"] = "ЗАПУСК+ВЫБЫТИЕ"
@@ -288,7 +288,7 @@ def _dry_to_final(df: pd.DataFrame) -> pd.DataFrame:
 
 def _disp_to_final(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
-        return pd.DataFrame(columns=["REG", "Дата", "Событие", "REM", "Кuda", "ID"])
+        return pd.DataFrame(columns=["REG", "Дата", "Событие", "REM", "Куда", "ID"])
     reg = df.get("reg", pd.Series(dtype=object)).astype(str)
     reason = df.get("disposal_reason", pd.Series(dtype=object)).astype(str)
     return pd.DataFrame(
@@ -297,7 +297,7 @@ def _disp_to_final(df: pd.DataFrame) -> pd.DataFrame:
             "Дата": _ts(df.get("event_date")),
             "Событие": reason.str.upper().where(reason.str.strip() != "", "ВЫБЫТИЕ"),
             "REM": reason,
-            "Кuda": reason,
+            "Куда": reason,
             "ID": reg,
         }
     )
@@ -308,6 +308,7 @@ def _write_yearly(prefix: str, df: pd.DataFrame, out_dir: Path, years: list[int]
         return
     work = df.copy()
     work["Дата"] = pd.to_datetime(work["Дата"], errors="coerce")
+    work = normalize_events_df(work)
     for year in years:
         part = work[work["Дата"].dt.year == year]
         if not part.empty:

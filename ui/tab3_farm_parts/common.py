@@ -765,7 +765,7 @@ def _prepare_tables(bundle: FarmUploadBundle) -> dict[str, pd.DataFrame]:
         raise ValueError(
             "Не хватает данных после разбора файлов: "
             + ", ".join(missing)
-            + ". Нужна колонка «Событие» или отдельные файлы по типам."
+            + ". Нужна колонка «Событие» / Event или отдельные файлы по типам."
         )
 
     calv_df = calv_df.copy()

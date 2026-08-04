@@ -160,22 +160,56 @@ def kaluga_trade_rules(farm: str, unit: str) -> dict[str, list[str]]:
     }
 
 
+def _canonical_sobytie_series(raw: pd.Series) -> pd.Series:
+    s = raw.astype(str).str.strip().str.upper().str.replace("Ё", "Е", regex=False)
+    out = s.copy()
+    rules: list[tuple[pd.Series, str]] = [
+        (s.str.contains("CALV|ОТЕЛ", na=False, regex=True), "ОТЕЛ"),
+        (s.str.contains("BRED|ОСЕМ", na=False, regex=True), "ОСЕМЕН"),
+        (s.str.contains("DRY|ЗАПУСК", na=False, regex=True), "ЗАПУСК"),
+        (s.str.contains("SOLD|ПРОД", na=False, regex=True), "ПРОДАНА"),
+        (s.str.contains("DIED|DEAD|ПАЛ|МЕР", na=False, regex=True), "ПАЛА"),
+        (s.str.contains("BORN|РОЖ", na=False, regex=True), "РОЖДЕН"),
+        (s.isin(["ВЫБЫТИЕ", "EXIT", "CULL", "SOLD"]), "ВЫБЫТИЕ"),
+    ]
+    for mask, label in rules:
+        out.loc[mask] = label
+    return out
+
+
 def normalize_events_df(df: pd.DataFrame) -> pd.DataFrame:
-    """Калуга: REM→Куда, Event→Событие (как в finál)."""
+    """Калуга: REM→Куда, Event/event_type→Событие (как в finál)."""
     df = df.copy()
     if "Date" in df.columns:
         df["Дата"] = pd.to_datetime(df.get("Дата", df["Date"]), errors="coerce")
-    else:
+    elif "Дата" in df.columns:
         df["Дата"] = pd.to_datetime(df["Дата"], errors="coerce")
+    else:
+        df["Дата"] = pd.NaT
+
+    if "Event" not in df.columns and "event_type" in df.columns:
+        df["Event"] = df["event_type"]
     if "Event" in df.columns:
-        raw = df["Event"].astype(str).str.strip().str.upper()
+        ev_raw = df["Event"]
         if "Событие" not in df.columns:
-            df["Событие"] = df["Event"]
+            df["Событие"] = ev_raw
+        else:
+            empty = df["Событие"].isna() | (
+                df["Событие"].astype(str).str.strip().isin(["", "nan", "None", "NaT"])
+            )
+            df.loc[empty, "Событие"] = df.loc[empty, "Event"]
+        canon = _canonical_sobytie_series(df["Событие"].fillna(df["Event"]))
+        df["Событие"] = canon
+        raw = df["Event"].astype(str).str.strip().str.upper()
         so = df["Событие"].astype(str).str.strip().str.upper()
         df.loc[raw.str.contains("SOLD", na=False), "Событие"] = "ПРОДАНА"
         df.loc[raw.str.contains("BRED", na=False), "Событие"] = "ОСЕМЕН"
         df.loc[so.str.contains("SOLD", na=False), "Событие"] = "ПРОДАНА"
         df.loc[so.str.contains("BRED", na=False), "Событие"] = "ОСЕМЕН"
+    elif "Событие" not in df.columns:
+        df["Событие"] = ""
+    if "Кuda" in df.columns and "Куда" not in df.columns:
+        df["Куда"] = df["Кuda"].astype(str).str.strip()
     if "Куда" not in df.columns and "REM" in df.columns:
         df["Куда"] = df["REM"].astype(str).str.strip()
     elif "Куда" in df.columns:
@@ -189,7 +223,10 @@ def normalize_events_df(df: pd.DataFrame) -> pd.DataFrame:
         if "REG" in df.columns:
             mask_id = (id_s == "") | (id_s.str.lower() == "nan")
             id_s = id_s.where(~mask_id, df["REG"].astype(str).fillna(""))
-        bdat = pd.to_datetime(df.get("BDAT", pd.NaT), errors="coerce")
+        if "BDAT" in df.columns:
+            bdat = pd.to_datetime(df["BDAT"], errors="coerce")
+        else:
+            bdat = pd.Series(pd.NaT, index=df.index)
         bdat_key = bdat.dt.strftime("%Y%m%d").fillna("")
         df["ключ_коровы"] = id_s.astype(str) + "_" + bdat_key.astype(str)
         bad_key = df["ключ_коровы"] == "_"
@@ -359,9 +396,13 @@ def patch_cell_source(src: str, cfg: PipelineConfig) -> str:
     if not folder_path.is_absolute():
         folder_path = (cfg.work_dir / folder_path).resolve()
     src = src.replace('folder = "фильтр_ЖК_Высокое"', f'folder = r"{folder_path}"')
-    src = src.replace("pd.read_excel('События-по-коровам.xlsx')", f'pd.read_excel(r"{cfg.events_path}")')
+    src = src.replace(
+        "pd.read_excel('События-по-коровам.xlsx')",
+        f'read_filter_excel(r"{cfg.events_path}")',
+    )
+    src = src.replace('pd.read_excel(f"{folder}/', 'read_filter_excel(f"{folder}/')
     aux = cfg.events_aux_path if cfg.events_aux_path.exists() else cfg.events_path
-    src = src.replace('pd.read_excel("События-по-коровам (1).xlsx")', f'pd.read_excel(r"{aux}")')
+    src = src.replace('pd.read_excel("События-по-коровам (1).xlsx")', f'read_filter_excel(r"{aux}")')
     bulls_stub = (
         f"_bp = Path(r'{cfg.bulls_path}')\n"
         "if _bp.exists():\n"
@@ -473,6 +514,8 @@ def run_cell(cell_id: int, src: str, ns: dict[str, Any], inj: dict[str, Any]) ->
     ns["_INJECT"] = inj
     ns["__file__"] = str(EXTRACTED)
     ns["Path"] = Path
+    ns["normalize_events_df"] = normalize_events_df
+    ns["read_filter_excel"] = read_filter_excel
     exec(compile(src, f"finale_cell_{cell_id}", "exec"), ns)  # noqa: S102
 
 
@@ -949,14 +992,12 @@ def assemble_tables(ns: dict[str, Any], cfg: PipelineConfig) -> tuple[pd.DataFra
 
 
 def _normalize_kaluga_event(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    if "Event" in out.columns and "Событие" not in out.columns:
-        out["Событие"] = out["Event"]
-    if "Date" in out.columns and "Дата" not in out.columns:
-        out["Дата"] = out["Date"]
-    if "LACT" in out.columns and "Lact" not in out.columns:
-        out["Lact"] = out["LACT"]
-    return out
+    return normalize_events_df(df)
+
+
+def read_filter_excel(path: str | Path) -> pd.DataFrame:
+    """Чтение годового Excel из filter_* с колонкой «Событие» (из Event при необходимости)."""
+    return normalize_events_df(pd.read_excel(path))
 
 
 def _filter_subdivision(df: pd.DataFrame, farm: str, unit: str) -> pd.DataFrame:
