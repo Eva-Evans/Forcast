@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import os
-from urllib.parse import quote_plus, urlparse
+import re
+from urllib.parse import quote_plus
+
+from sqlalchemy.engine.url import make_url
 
 
 def _secrets_get(key: str) -> str | None:
@@ -18,57 +21,100 @@ def _secrets_get(key: str) -> str | None:
     return None
 
 
+def _dsn_is_placeholder(dsn: str) -> bool:
+    u = dsn.upper()
+    return bool(
+        re.search(r"\[YOUR[-_\s]?PASSWORD\]", u)
+        or "[YOUR-" in u
+        or "YOUR-PASSWORD" in u
+    )
+
+
 def _build_dsn_from_supabase_parts() -> str | None:
-    """Streamlit / Supabase UI sometimes exposes host, user, password separately."""
+    """Password/host отдельно — без URL-кодирования вручную в одной строке."""
     host = _secrets_get("SUPABASE_DB_HOST") or _secrets_get("DB_HOST")
-    user = _secrets_get("SUPABASE_DB_USER") or _secrets_get("DB_USER") or "postgres"
     password = _secrets_get("SUPABASE_DB_PASSWORD") or _secrets_get("DB_PASSWORD")
+    user = _secrets_get("SUPABASE_DB_USER") or _secrets_get("DB_USER") or "postgres"
     database = _secrets_get("SUPABASE_DB_NAME") or _secrets_get("DB_NAME") or "postgres"
     port = _secrets_get("SUPABASE_DB_PORT") or _secrets_get("DB_PORT") or "5432"
     if not host or not password:
         return None
-    safe_pw = quote_plus(password)
     return (
-        f"postgresql+psycopg2://{quote_plus(user)}:{safe_pw}"
+        f"postgresql+psycopg2://{quote_plus(user)}:{quote_plus(password)}"
         f"@{host}:{port}/{quote_plus(database)}?sslmode=require"
     )
 
 
 def normalize_postgres_dsn(dsn: str) -> str:
-    dsn = dsn.strip()
+    dsn = dsn.strip().strip('"').strip("'")
+    if _dsn_is_placeholder(dsn):
+        raise ValueError(
+            "В Secrets в POSTGRES_DSN остался шаблон [YOUR-PASSWORD]. "
+            "Вставьте реальный пароль: Supabase → Project Settings → Database → Database password. "
+            "Либо удалите POSTGRES_DSN и задайте SUPABASE_DB_HOST + SUPABASE_DB_PASSWORD."
+        )
+    if "@" not in dsn or "://" not in dsn:
+        raise ValueError(
+            "POSTGRES_DSN должен быть URL вида "
+            "postgresql+psycopg2://postgres:ПАРОЛЬ@db....supabase.co:5432/postgres?sslmode=require"
+        )
+
     if dsn.startswith("postgres://"):
         dsn = "postgresql+psycopg2://" + dsn[len("postgres://") :]
     elif dsn.startswith("postgresql://"):
         dsn = "postgresql+psycopg2://" + dsn[len("postgresql://") :]
-    elif dsn.startswith("postgresql+psycopg2://"):
-        pass
-    else:
+    elif not dsn.startswith("postgresql+psycopg2://"):
         raise ValueError(
             "POSTGRES_DSN должен начинаться с postgresql:// или postgresql+psycopg2://"
         )
 
-    parsed = urlparse(dsn)
-    host = (parsed.hostname or "").lower()
-    if "supabase.co" in host and "sslmode=" not in dsn:
-        dsn = f"{dsn}&sslmode=require" if "?" in dsn else f"{dsn}?sslmode=require"
-    return dsn
+    try:
+        url = make_url(dsn)
+    except Exception as exc:
+        raise ValueError(
+            "Не удалось разобрать POSTGRES_DSN (часто ломают спецсимволы в пароле @ # [ ]). "
+            "Задайте отдельно SUPABASE_DB_HOST и SUPABASE_DB_PASSWORD в Secrets — так надёжнее."
+        ) from exc
+
+    host = (url.host or "").lower()
+    if "supabase.co" in host:
+        q = dict(url.query) if url.query else {}
+        if q.get("sslmode") != "require":
+            url = url.update_query_dict({"sslmode": "require"})
+
+    return url.render_as_string(hide_password=False)
 
 
 def resolve_postgres_dsn() -> str:
     raw = _secrets_get("POSTGRES_DSN")
-    if not raw:
-        built = _build_dsn_from_supabase_parts()
-        if built:
-            return normalize_postgres_dsn(built)
-        return normalize_postgres_dsn(
-            "postgresql+psycopg2://herd_user:herd_password@db:5432/herd_forecast"
+    parts_dsn = _build_dsn_from_supabase_parts()
+
+    if raw and not _dsn_is_placeholder(raw):
+        try:
+            return normalize_postgres_dsn(raw)
+        except ValueError:
+            if parts_dsn:
+                return normalize_postgres_dsn(parts_dsn)
+            raise
+
+    if raw and _dsn_is_placeholder(raw):
+        if parts_dsn:
+            return normalize_postgres_dsn(parts_dsn)
+        raise ValueError(
+            "POSTGRES_DSN содержит [YOUR-PASSWORD]. Замените пароль или добавьте "
+            "SUPABASE_DB_HOST и SUPABASE_DB_PASSWORD в Secrets."
         )
-    return normalize_postgres_dsn(raw)
+
+    if parts_dsn:
+        return normalize_postgres_dsn(parts_dsn)
+
+    return normalize_postgres_dsn(
+        "postgresql+psycopg2://herd_user:herd_password@db:5432/herd_forecast"
+    )
 
 
 POSTGRES_DSN = resolve_postgres_dsn()
 
-# Finál ML pipeline (prognoz_vseh_parametrov) instead of forecast_dynamic simulation.
 USE_FINAL_PIPELINE = (_secrets_get("USE_FINAL_PIPELINE") or "1").strip() not in (
     "0",
     "false",
