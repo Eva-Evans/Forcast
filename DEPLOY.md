@@ -129,16 +129,31 @@ make rev  # down -v (с wipe БД) и up --build
 1. Зайдите на [share.streamlit.io](https://share.streamlit.io) под GitHub-аккаунтом с доступом к репо.
 2. **New app** → Repository `Eva-Evans/Forcast`, branch `main`, **Main file path** `app.py`.
 3. **Advanced settings** → Python 3.11 (как в Dockerfile; 3.10+ обычно OK).
-4. **Secrets** (TOML):
+4. **Secrets** (TOML) — для **Supabase** обязательно драйвер и SSL:
 
 ```toml
-POSTGRES_DSN = "postgresql+psycopg2://USER:PASS@HOST:5432/herd_forecast?sslmode=require"
-ADMIN_KEY = "ваш_секрет"
+# Пароль — реальный из Supabase → Settings → Database (не плейсхолдер [YOUR-PASSWORD]).
+# Спецсимволы в пароле (@ # % и т.д.) лучше URL-кодировать или задать новый пароль без них.
+POSTGRES_DSN = "postgresql+psycopg2://postgres:ВАШ_ПАРОЛЬ@db.xxxxx.supabase.co:5432/postgres?sslmode=require"
+
+ADMIN_KEY = "supersecret123"
 USE_FINAL_PIPELINE = "1"
-FORECAST_HORIZON_MONTHS = "15"
 ```
 
-5. Deploy. Дождитесь установки `requirements.txt` (есть **xgboost**, **scikit-learn** — сборка может занять несколько минут).
+Альтернатива (отдельные поля — подхватит `config.py`):
+
+```toml
+SUPABASE_DB_HOST = "db.xxxxx.supabase.co"
+SUPABASE_DB_PASSWORD = "ВАШ_ПАРОЛЬ"
+SUPABASE_DB_USER = "postgres"
+SUPABASE_DB_NAME = "postgres"
+SUPABASE_DB_PORT = "5432"
+ADMIN_KEY = "supersecret123"
+```
+
+5. В Supabase → **SQL Editor** выполните скрипт **`db/init.sql`** из репозитория (создаст `calvings_births_raw`, …). Без этого загрузка может падать на других ошибках.
+
+6. Deploy.
 
 ### B.4. Ограничения Streamlit Cloud для этого проекта
 
