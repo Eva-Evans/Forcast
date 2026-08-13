@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+from pathlib import Path
 from urllib.parse import quote_plus
 
 from sqlalchemy.engine.url import make_url
@@ -186,6 +187,9 @@ USE_FINAL_PIPELINE = (_secrets_get("USE_FINAL_PIPELINE") or "1").strip() not in 
 
 FORECAST_HORIZON_MONTHS = int(_secrets_get("FORECAST_HORIZON_MONTHS") or "15")
 
+# Порядок строк и подписи — core/forecast_params.py
+from core.forecast_params import FORECAST_DISPLAY_PARAMS  # noqa: E402
+
 SHOW_TAB2_PARAMS = (_secrets_get("SHOW_TAB2_PARAMS") or "0").strip() in ("1", "true", "True")
 SHOW_TAB3_LEGACY_FARM_FORECAST = (_secrets_get("SHOW_TAB3_LEGACY_FARM_FORECAST") or "0").strip() in (
     "1",
@@ -193,6 +197,11 @@ SHOW_TAB3_LEGACY_FARM_FORECAST = (_secrets_get("SHOW_TAB3_LEGACY_FARM_FORECAST")
     "True",
 )
 
-PIPELINE_WORK_ROOT = _secrets_get("PIPELINE_WORK_ROOT") or ".pipeline_runtime"
+_PROJECT_ROOT = Path(__file__).resolve().parent
+_pr = _secrets_get("PIPELINE_WORK_ROOT") or ".pipeline_runtime"
+_pr_path = Path(_pr)
+PIPELINE_WORK_ROOT = str(
+    (_PROJECT_ROOT / _pr_path).resolve() if not _pr_path.is_absolute() else _pr_path.resolve()
+)
 
 ADMIN_KEY = _secrets_get("ADMIN_KEY")

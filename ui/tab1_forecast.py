@@ -9,6 +9,7 @@ import pandas as pd
 import streamlit as st
 
 from config import FORECAST_HORIZON_MONTHS, USE_FINAL_PIPELINE
+from core.forecast_params import MANUAL_BASELINE_FIELDS, manual_baseline_from_inputs
 from core.final_forecast_service import run_final_forecast_for_subdivision
 from core.subdivisions_registry import all_known_units_flat, display_label
 from forecast_dynamic import latest_data_date
@@ -85,10 +86,35 @@ def render_tab1_forecast() -> None:
         return
 
     st.subheader("Прогноз по подразделению (finál + ML)")
-    st.caption(
-        f"Горизонт: {FORECAST_HORIZON_MONTHS} месяцев от месяца последней даты в данных. "
-        "Загрузите файлы на вкладке «Загрузка данных», затем выберите подразделение."
+
+    mode = st.radio(
+        "Режим",
+        options=("Прогноз (по последней дате в БД)", "Бэктест (обрезка на выбранный месяц)"),
+        horizontal=True,
+        key="tab1_final_mode",
     )
+    backtest = mode.startswith("Бэктест")
+    anchor_date: date | None = None
+    if backtest:
+        c_y, c_m = st.columns(2)
+        bt_year = c_y.number_input("Год якоря (обучение до конца месяца)", 2022, 2030, 2024, key="tab1_bt_year")
+        bt_month = c_m.selectbox(
+            "Месяц якоря",
+            list(range(1, 13)),
+            index=8,
+            format_func=lambda m: f"{m:02d}",
+            key="tab1_bt_month",
+        )
+        anchor_date = date(int(bt_year), int(bt_month), 1)
+        st.caption(
+            f"События обрежутся по **{bt_year}-{bt_month:02d}**, прогноз на **{FORECAST_HORIZON_MONTHS}** месяцев вперёд "
+            "(finál + лист «факт» для сравнения с прогнозом)."
+        )
+    else:
+        st.caption(
+            f"Горизонт: {FORECAST_HORIZON_MONTHS} месяцев от месяца последней даты в данных. "
+            "Только прогноз (без листа «факт»). Загрузите файлы на вкладке «Загрузка данных»."
+        )
 
     options = _subdivision_options()
     if not options:
@@ -117,6 +143,33 @@ def render_tab1_forecast() -> None:
         except Exception as e:
             st.warning(f"Не удалось прочитать данные подразделения «{unit}»: {e}")
 
+    if backtest and anchor_date:
+        baseline_anchor = anchor_date.strftime("%Y-%m")
+        baseline_caption = f"конец {baseline_anchor} (бэктест)"
+    elif last_date:
+        baseline_anchor = last_date.strftime("%Y-%m")
+        baseline_caption = f"конец {baseline_anchor} (последняя дата в данных)"
+    else:
+        baseline_anchor = "—"
+        baseline_caption = "после загрузки данных"
+
+    baseline_raw: dict[str, Any] = {}
+    with st.expander(f"База поголовья на {baseline_caption}", expanded=False):
+        st.caption(
+            "Необязательно. Если заполнить — сухостойные, дойные, фуражные и лактации L1–L5+ "
+            "на дату обучения подставятся в пайплайн вместо авторасчёта из файлов."
+        )
+        bcols = st.columns(3)
+        for i, (key, label) in enumerate(MANUAL_BASELINE_FIELDS):
+            with bcols[i % 3]:
+                baseline_raw[key] = st.number_input(
+                    label,
+                    min_value=0,
+                    value=0,
+                    step=1,
+                    key=f"tab1_baseline_{key}",
+                )
+
     run = st.button("Рассчитать прогноз", type="primary", key="tab1_final_run", use_container_width=True)
 
     if run:
@@ -131,12 +184,17 @@ def render_tab1_forecast() -> None:
             st.error(f"Ошибка загрузки из БД: {e}")
             st.stop()
 
+        manual_baseline = manual_baseline_from_inputs(baseline_raw)
+
         with st.spinner("Считаю finál-пайплайн (XGB + цепочка моделей)… это может занять несколько минут."):
             try:
                 forecast_table, fact_table, meta = run_final_forecast_for_subdivision(
                     unit,
                     tables,
                     farm_hint=farm_use,
+                    anchor_date=anchor_date,
+                    backtest=backtest,
+                    manual_baseline=manual_baseline,
                 )
             except Exception as e:
                 st.error(f"Ошибка расчёта: {e}")
@@ -150,6 +208,7 @@ def render_tab1_forecast() -> None:
             f"Готово: {meta.get('farm')} / {meta.get('unit')}, "
             f"обучение до {meta.get('train_end')}, месяцы: {', '.join(meta.get('month_cols', [])[:3])}…"
         )
+        st.rerun()
 
     forecast_table = st.session_state.get("tab1_final_forecast")
     fact_table = st.session_state.get("tab1_final_fact")
@@ -171,12 +230,11 @@ def render_tab1_forecast() -> None:
             key="tab1_final_dl",
         )
 
-    with st.expander("Backtesting / факт (история из пайплайна)", expanded=False):
+    with st.expander("Backtesting / факт (только в режиме бэктеста)", expanded=False):
         st.caption(
-            "Лист «факт» строится тем же пайплайном, что и в prognoz_vseh_parametrov "
-            "(для месяцев, где есть история). Сравнивайте с «прогноз» по тем же строкам."
+            "Лист «факт» строится только при бэктесте — для сравнения прогноза с историей на выбранном якоре."
         )
         if isinstance(fact_table, pd.DataFrame) and not fact_table.empty:
             st.dataframe(_wide_to_display(fact_table), use_container_width=True)
         else:
-            st.info("Запустите расчёт, чтобы увидеть таблицу «факт».")
+            st.info("Запустите расчёт в режиме «Бэктест», чтобы увидеть таблицу «факт».")

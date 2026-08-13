@@ -814,8 +814,8 @@ def _filter_tables_by_farm(tables: dict[str, pd.DataFrame], farm_name: str) -> d
     return out
 
 def _subdivision_names_from_tables(tables: dict[str, pd.DataFrame]) -> list[str]:
+    """Все уникальные подразделения из calv/ins/dry/disp, отсортированные по имени."""
     seen: dict[str, str] = {}
-    presence: dict[str, set[str]] = {}
     for key in ("calv", "ins", "dry", "disp"):
         df = tables.get(key)
         if not isinstance(df, pd.DataFrame) or df.empty or "__subdivision" not in df.columns:
@@ -826,16 +826,8 @@ def _subdivision_names_from_tables(tables: dict[str, pd.DataFrame]) -> list[str]
             u = str(v).upper()
             if u not in seen:
                 seen[u] = str(v)
-            presence.setdefault(u, set()).add(key)
-
     if not seen:
         return []
-
-                                                                             
-                                            
-    core = [seen[k] for k in sorted(seen.keys()) if len(presence.get(k, set())) >= 2]
-    if core:
-        return core
     return [seen[k] for k in sorted(seen.keys())]
 
 def _farm_name_for_subdivision_from_tables(
@@ -898,8 +890,12 @@ def _save_bundle_tables_to_db(
     replace_subdivision: bool = True,
 ) -> list[str]:
     tables = _normalize_bundle_meta(tables)
+    farm_candidates = _infer_bundle_farm_candidates(tables)
     inferred_farm = _choose_bundle_farm(bundle_name, tables)
-    tables = _filter_tables_by_farm(tables, inferred_farm or bundle_name)
+    # Сводные Excel по всей Калуге содержат несколько хозяйств (Source.Name).
+    # Фильтр по одному хозяйству оставляет только его подразделения (напр. 3 из КН Запад).
+    if len(farm_candidates) <= 1:
+        tables = _filter_tables_by_farm(tables, inferred_farm or bundle_name)
     subdivisions = _subdivision_names_from_tables(tables)
     if not subdivisions:
         subdivisions = [(bundle_name or "").strip() or "ПОДРАЗДЕЛЕНИЕ_1"]

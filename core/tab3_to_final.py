@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -7,6 +8,27 @@ from typing import Any
 import pandas as pd
 
 from prognoz_vseh_parametrov import SUBDIVISION_ALIASES, normalize_events_df
+
+_ILLEGAL_XLSX_CHARS = re.compile(r"[\000-\010]|[\013-\014]|[\016-\037]")
+
+
+def _sanitize_excel_value(value: object) -> object:
+    if not isinstance(value, str):
+        return value
+    return _ILLEGAL_XLSX_CHARS.sub("", value)
+
+
+def _sanitize_df_for_excel(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    for col in out.columns:
+        if pd.api.types.is_string_dtype(out[col]) or out[col].dtype == object:
+            out[col] = out[col].map(_sanitize_excel_value)
+    return out
+
+
+def _to_excel_safe(df: pd.DataFrame, path: Path, **kwargs: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _sanitize_df_for_excel(df).to_excel(path, index=False, **kwargs)
 
 
 def _ts(s: Any) -> pd.Series:
@@ -187,7 +209,7 @@ def build_events_workbook(
     df_all["Source.Name"] = farm
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    df_all.to_excel(out_path, index=False)
+    _to_excel_safe(df_all, out_path)
     if csv_path is not None:
         csv_path.parent.mkdir(parents=True, exist_ok=True)
         df_all.to_csv(csv_path, index=False, encoding="utf-8-sig")
@@ -201,7 +223,7 @@ def export_bulls_workbook(tables: dict[str, pd.DataFrame], path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     bulls = tables.get("bulls", pd.DataFrame())
     if not isinstance(bulls, pd.DataFrame) or bulls.empty:
-        pd.DataFrame({"Плем": [], "Бык": []}).to_excel(path, index=False)
+        _to_excel_safe(pd.DataFrame({"Плем": [], "Бык": []}), path)
         return path
 
     code = bulls.get("bull_code", pd.Series(dtype=object)).astype(str).str.strip()
@@ -226,11 +248,21 @@ def export_bulls_workbook(tables: dict[str, pd.DataFrame], path: Path) -> Path:
 
     out = pd.DataFrame({"Плем": plem, "Бык": code})
     out = out.loc[(out["Бык"] != "") & (out["Бык"].str.lower() != "nan")].drop_duplicates(subset=["Бык"])
-    out.to_excel(path, index=False)
+    _to_excel_safe(out, path)
     return path
 
 
 # --- годовые Excel для filter_* (ячейки finál с Отелы_2022.xlsx …) ---
+
+
+def _calv_event_col(df: pd.DataFrame) -> pd.Series:
+    """Событие для Отелы_YYYY: нормализация CALVING/РОЖД → ОТЕЛ."""
+    raw = df.get("event_type", pd.Series("", index=df.index)).astype(str).str.strip().str.upper()
+    raw = raw.str.replace("Ё", "Е", regex=False)
+    empty = raw.isna() | raw.isin(("", "NAN", "NONE", "NAT"))
+    raw = raw.where(~empty, "ОТЕЛ")
+    calv = raw.str.contains("CALV|ОТЕЛ|РОЖ|BORN|BIRTH", na=False)
+    return raw.where(~calv, "ОТЕЛ")
 
 
 def _calv_to_final(df: pd.DataFrame) -> pd.DataFrame:
@@ -243,7 +275,7 @@ def _calv_to_final(df: pd.DataFrame) -> pd.DataFrame:
             "REG": df.get("reg", pd.Series(dtype=object)).astype(str),
             "Дата": _ts(df.get("event_date")),
             "BDAT": _ts(df.get("birth_date")),
-            "Событие": df.get("event_type", pd.Series(dtype=object)).astype(str).str.upper(),
+            "Событие": _calv_event_col(df),
             "GNDR": df.get("sex", pd.Series(dtype=object)),
             "DREG": df.get("mother_reg", pd.Series(dtype=object)).astype(str),
             "LACT": pd.to_numeric(df.get("lact"), errors="coerce"),
@@ -312,17 +344,38 @@ def _write_yearly(prefix: str, df: pd.DataFrame, out_dir: Path, years: list[int]
     for year in years:
         part = work[work["Дата"].dt.year == year]
         if not part.empty:
-            part.to_excel(out_dir / f"{prefix}_{year}.xlsx", index=False)
+            _to_excel_safe(part, out_dir / f"{prefix}_{year}.xlsx")
 
 
 def export_tab3_to_filter_folder(
     tables: dict[str, pd.DataFrame],
     out_dir: Path,
+    *,
+    train_end_cutoff: pd.Timestamp | None = None,
 ) -> Path:
+    """Build filter_* yearly Excel; optionally drop events after train_end (trim for ML train)."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    years = _years_in_tables(tables)
-    _write_yearly("Отелы", _calv_to_final(tables.get("calv", pd.DataFrame())), out_dir, years)
-    _write_yearly("Осеменения", _ins_to_final(tables.get("ins", pd.DataFrame())), out_dir, years)
-    _write_yearly("Запуск", _dry_to_final(tables.get("dry", pd.DataFrame())), out_dir, years)
-    _write_yearly("Выбытие", _disp_to_final(tables.get("disp", pd.DataFrame())), out_dir, years)
+    for old in out_dir.glob("*.xlsx"):
+        old.unlink(missing_ok=True)
+
+    work_tables = tables
+    if train_end_cutoff is not None:
+        cutoff = pd.Timestamp(train_end_cutoff).normalize()
+        trimmed: dict[str, pd.DataFrame] = {}
+        for key, df in tables.items():
+            if key == "bulls" or not isinstance(df, pd.DataFrame):
+                trimmed[key] = df if isinstance(df, pd.DataFrame) else pd.DataFrame()
+                continue
+            part = df.copy()
+            if "event_date" in part.columns:
+                dt = pd.to_datetime(part["event_date"], errors="coerce")
+                part = part.loc[dt.notna() & (dt <= cutoff)].copy()
+            trimmed[key] = part
+        work_tables = trimmed
+
+    years = _years_in_tables(work_tables)
+    _write_yearly("Отелы", _calv_to_final(work_tables.get("calv", pd.DataFrame())), out_dir, years)
+    _write_yearly("Осеменения", _ins_to_final(work_tables.get("ins", pd.DataFrame())), out_dir, years)
+    _write_yearly("Запуск", _dry_to_final(work_tables.get("dry", pd.DataFrame())), out_dir, years)
+    _write_yearly("Выбытие", _disp_to_final(work_tables.get("disp", pd.DataFrame())), out_dir, years)
     return out_dir

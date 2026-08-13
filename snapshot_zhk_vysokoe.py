@@ -394,6 +394,38 @@ def monthly_young_neteli_history(
     return pd.DataFrame(rows)
 
 
+def monthly_dry_milking_fact_history(
+    tables: dict[str, pd.DataFrame],
+    *,
+    start_year: int = 2022,
+    start_month: int = 1,
+    end_year: int = 2025,
+    end_month: int = 12,
+) -> pd.DataFrame:
+    """Факт сухостойных / дойных / фуражных на конец каждого месяца (снимок из событий)."""
+    calv, ins, dry, disp = tables["calv_df"], tables["ins_df"], tables["dry_df"], tables["disp_df"]
+    rows: list[dict[str, float | int]] = []
+    y, m = start_year, start_month
+    while (y, m) <= (end_year, end_month):
+        as_of = month_end_date(y, m)
+        snap = _actual_nonbirth_snapshot_from_tables(calv, ins, dry, disp, as_of)
+        rows.append(
+            {
+                "год": y,
+                "месяц": m,
+                "сухостойные": float(snap.get("Сухостойные коровы", 0.0)),
+                "дойные": float(snap.get("Дойные коровы", 0.0)),
+                "фуражные": float(snap.get("Дойные коровы", 0.0))
+                + float(snap.get("Сухостойные коровы", 0.0)),
+            }
+        )
+        m += 1
+        if m > 12:
+            m = 1
+            y += 1
+    return pd.DataFrame(rows)
+
+
 # =============================================================================
 # Запуск (после ячейки «# фильтр ЖК Высокое»)
 # =============================================================================
