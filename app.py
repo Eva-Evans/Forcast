@@ -4,6 +4,7 @@ import os
 import streamlit as st
 
 from config import SHOW_TAB2_PARAMS, USE_FINAL_PIPELINE
+from core.db_health import render_database_gate
 from ui.tab1_forecast import render_tab1_forecast
 from ui.tab3_farm import render_tab3_farm
 
@@ -12,6 +13,8 @@ if SHOW_TAB2_PARAMS:
 
 st.set_page_config(page_title="Прогноз поголовья", layout="wide")
 st.title("Прогноз поголовья (finál)")
+
+render_database_gate()
 
 with st.expander("Справка", expanded=False):
     st.markdown(
