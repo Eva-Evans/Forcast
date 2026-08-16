@@ -755,6 +755,22 @@ def _patch_split_calvings_lact(src: str) -> str:
     return src
 
 
+_PREDICT_MONTHS_BLOCK = (
+    "predict_months = []\n"
+    "for month in [10, 11, 12]:\n"
+    "    predict_months.append((2024, month))\n"
+    "for month in range(1, 13):\n"
+    "    predict_months.append((2025, month))"
+)
+
+
+def _patch_predict_months_loops(src: str) -> str:
+    """Finál cells: горизонт прогноза из _PREDICT_MONTHS (UI), не Oct2024–Dec2025."""
+    if _PREDICT_MONTHS_BLOCK in src:
+        src = src.replace(_PREDICT_MONTHS_BLOCK, "predict_months = list(_PREDICT_MONTHS)")
+    return src
+
+
 def _patch_cell10_furazh_baseline(src: str, baseline: dict[str, float] | None) -> str:
     """Если furazh_forecast пуст (cell 12 ещё не считался) — база с якоря."""
     if not baseline or baseline.get("furazh") is None:
@@ -1210,6 +1226,7 @@ def patch_cell_source(src: str, cfg: PipelineConfig) -> str:
     src = _patch_birth_event_rozhd(src)
     src = _patch_calving_event_types(src)
     src = _patch_split_calvings_lact(src)
+    src = _patch_predict_months_loops(src)
     src = _patch_gridsearch_min_samples(src)
     src = _apply_trade_patches(src, cfg)
     src = _patch_cell23_vectorize(src)
@@ -1988,7 +2005,9 @@ def log_kaluga_input_sources(cfg: PipelineConfig, log: PipelineDetailLogger | No
         events_path=str(cfg.events_path),
         lactation_path=str(cfg.lactation_path),
         output_xlsx=str(cfg.output_xlsx),
-        train_end=str(TRAIN_END.date()),
+        train_end=str(cfg.resolved_train_end().date()),
+        predict_months=cfg.resolved_predict_months(),
+        month_cols=cfg.resolved_month_cols(),
     )
     fdir = Path(cfg.filter_folder)
     if fdir.is_dir():
@@ -2113,12 +2132,8 @@ def after_cell_25(ns: dict[str, Any]) -> None:
 def run_young_stock(cfg: PipelineConfig) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Факт и прогноз молодняка + нетели (snapshot + XGB как forecast_young_groups)."""
     from forecast_young_groups import (  # noqa: WPS433
-        PREDICT_END,
-        PREDICT_START,
-        TRAIN_END,
         build_predict_row,
         create_features,
-        iter_predict_months,
         load_event_features,
         load_history,
         month_key,
@@ -2151,10 +2166,18 @@ def run_young_stock(cfg: PipelineConfig) -> tuple[pd.DataFrame, pd.DataFrame]:
     meta = {"год", "месяц", "дата_месяц", "дата_снимка"}
     feature_cols = [c for c in df.columns if c not in meta and c not in targets]
 
-    train_df = df[df["дата_месяц"] <= TRAIN_END].copy()
+    train_end = cfg.resolved_train_end()
+    predict_months = cfg.resolved_predict_months()
+    if predict_months:
+        py, pm = predict_months[0]
+        ey, em = predict_months[-1]
+    else:
+        py, pm, ey, em = 2024, 10, 2025, 12
+
+    train_df = df[df["дата_месяц"] <= train_end].copy()
     models = train_models(train_df, feature_cols, targets)
     print(
-        f"  [молодняк] обучение: {len(train_df)} мес. (≤ {TRAIN_END.date()}), "
+        f"  [молодняк] обучение: {len(train_df)} мес. (≤ {train_end.date()}), "
         f"признаков {len(feature_cols)}, целей {len(targets)}"
     )
     monthly_avg: dict[str, dict[int, float]] = {}
@@ -2170,7 +2193,7 @@ def run_young_stock(cfg: PipelineConfig) -> tuple[pd.DataFrame, pd.DataFrame]:
 
     pred_rows = []
     trend = len(train_df)
-    for year, month in iter_predict_months(PREDICT_START, PREDICT_END):
+    for year, month in predict_months:
         trend += 1
         X_pred = build_predict_row(year, month, trend, forecasts, monthly_avg, feature_cols)
         row = {"год": year, "месяц": month}
@@ -2181,18 +2204,20 @@ def run_young_stock(cfg: PipelineConfig) -> tuple[pd.DataFrame, pd.DataFrame]:
         pred_rows.append(row)
     pred_df = pd.DataFrame(pred_rows)
 
+    if cfg.forecast_only:
+        return pd.DataFrame(columns=["год", "месяц"] + snap.YOUNG_AND_NETELI_KEYS), pred_df
+
     fact_rows = df[
-        (df["дата_месяц"] >= pd.Timestamp("2024-10-01"))
-        & (df["дата_месяц"] <= pd.Timestamp("2025-12-01"))
+        (df["дата_месяц"] >= pd.Timestamp(f"{py}-{pm:02d}-01"))
+        & (df["дата_месяц"] <= pd.Timestamp(f"{ey}-{em:02d}-01"))
     ][["год", "месяц"] + snap.YOUNG_AND_NETELI_KEYS].copy()
 
     if fact_rows.empty:
         raw = load_vysokoe_raw_tables(str(folder_path))
         tables = excel_to_backtest_tables(raw)
-        fact_rows = monthly_young_neteli_history(tables, 2025, 12, 2022, 1)
+        fact_rows = monthly_young_neteli_history(tables, ey, em, 2022, 1)
         fact_rows = fact_rows[
-            (fact_rows["год"] > 2024)
-            | ((fact_rows["год"] == 2024) & (fact_rows["месяц"] >= 10))
+            (fact_rows["год"] > py) | ((fact_rows["год"] == py) & (fact_rows["месяц"] >= pm))
         ][["год", "месяц"] + snap.YOUNG_AND_NETELI_KEYS]
 
     return fact_rows, pred_df
@@ -2229,12 +2254,19 @@ def run_pipeline(cfg: PipelineConfig) -> tuple[pd.DataFrame, pd.DataFrame]:
     _prev_cwd = os.getcwd()
     os.chdir(cfg.work_dir)
     cells = load_cell_sources()
+    predict_months = cfg.resolved_predict_months()
     ns: dict[str, Any] = {
         "__name__": "__main__",
         "__builtins__": __builtins__,
         "pd": pd,
         "np": np,
+        "_PREDICT_MONTHS": predict_months,
+        "_TRAIN_END_TS": cfg.resolved_train_end(),
     }
+    print(
+        f"Горизонт прогноза: обучение до {cfg.resolved_train_end().date()}, "
+        f"месяцы {[f'{y}-{m:02d}' for y, m in predict_months]}"
+    )
     try:
         try:
             train_end = cfg.resolved_train_end()
