@@ -17,7 +17,7 @@ from core.tab3_to_final import (
 )
 from prognoz_vseh_parametrov import SUBDIVISION_ALIASES
 
-ARTIFACTS_CACHE_VERSION = 2
+ARTIFACTS_CACHE_VERSION = 3
 
 _TABLE_KEY_COLS: dict[str, list[str]] = {
     "calv": ["reg", "mother_reg", "birth_date", "sex", "event_type", "event_date"],

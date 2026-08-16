@@ -607,23 +607,53 @@ def _patch_bulls_remark_and_type(src: str) -> str:
 
 
 def _patch_birth_event_rozhd(src: str) -> str:
-    """Калуга/DZ: рождения = РОЖД (не только РОЖДЕН)."""
+    """Калуга/DZ: рождения = РОЖД/ОТЕЛ (не только РОЖДЕН)."""
     birth_isin = (
-        "df['Событие'].astype(str).str.upper().str.strip()"
-        ".isin(('РОЖД', 'РОЖДЕН', 'CALF', 'CALVED', 'РОЖДЕНИЕ'))"
+        "df['Событие'].astype(str).str.upper().str.strip().str.replace('NAN', '', regex=False)"
+        ".isin(('РОЖД', 'РОЖДЕН', 'CALF', 'CALVED', 'РОЖДЕНИЕ', "
+        "'ОТЕЛ', 'ОТЁЛ', 'CALVING', 'ОТЕЛЕНИЕ'))"
     )
-    src = src.replace(
-        "birth_mask = df['Событие'].str.upper().str.strip() == 'РОЖДЕН'",
-        f"birth_mask = {birth_isin}",
+    calv_isin = (
+        "df['Событие'].astype(str).str.upper().str.strip().str.replace('NAN', '', regex=False)"
+        ".isin(('ОТЕЛ', 'ОТЁЛ', 'CALVING', 'CALVED', 'ОТЕЛЕНИЕ', "
+        "'РОЖД', 'РОЖДЕН', 'CALF', 'РОЖДЕНИЕ'))"
     )
+    birth_block_old = (
+        "    # Только события \"Рожден\"\n"
+        "    birth_mask = df['Событие'].str.upper().str.strip() == 'РОЖДЕН'\n"
+        "    df = df[birth_mask].copy()"
+    )
+    birth_block_new = (
+        "    # Рождения: РОЖД/РОЖДЕН или отёлы (Калуга — Отелы_YYYY)\n"
+        f"    birth_mask = {birth_isin}\n"
+        "    if not birth_mask.any() and len(df) > 0:\n"
+        f"        birth_mask = {calv_isin}\n"
+        "    df = df[birth_mask].copy()"
+    )
+    if birth_block_old in src:
+        src = src.replace(birth_block_old, birth_block_new)
+    else:
+        src = src.replace(
+            "birth_mask = df['Событие'].str.upper().str.strip() == 'РОЖДЕН'",
+            f"birth_mask = {birth_isin}",
+        )
     src = src.replace(
         "all_calvings = all_calvings[all_calvings['Событие'].str.upper().str.strip() == 'РОЖДЕН']",
         "all_calvings = all_calvings[all_calvings['Событие'].astype(str).str.upper().str.strip()"
-        ".isin(('РОЖД', 'РОЖДЕН', 'CALF', 'CALVED', 'РОЖДЕНИЕ'))]",
+        ".isin(('РОЖД', 'РОЖДЕН', 'CALF', 'CALVED', 'РОЖДЕНИЕ', "
+        "'ОТЕЛ', 'ОТЁЛ', 'CALVING', 'ОТЕЛЕНИЕ'))]",
     )
-    return src
-
-
+    src = src.replace(
+        "print(f\"  Телочки: {train_df['телочки'].sum()} ({train_df['телочки'].sum()/train_df['отелы'].sum()*100:.1f}%)\")\n"
+        "print(f\"  Бычки: {train_df['бычки'].sum()} ({train_df['бычки'].sum()/train_df['отелы'].sum()*100:.1f}%)\")",
+        "_birth_total = train_df['отелы'].sum()\n"
+        "if _birth_total:\n"
+        "    print(f\"  Телочки: {train_df['телочки'].sum()} ({train_df['телочки'].sum()/_birth_total*100:.1f}%)\")\n"
+        "    print(f\"  Бычки: {train_df['бычки'].sum()} ({train_df['бычки'].sum()/_birth_total*100:.1f}%)\")\n"
+        "else:\n"
+        "    print(\"  Телочки: 0 (нет данных)\")\n"
+        "    print(\"  Бычки: 0 (нет данных)\")",
+    )
     return src
 
 
@@ -697,14 +727,31 @@ def _patch_gridsearch_min_samples(src: str) -> str:
     )
     if cell1_block in src:
         src = src.replace(cell1_block, cell1_new, 1)
-    old = "tscv = TimeSeriesSplit(n_splits=min(3, len(train_clean)-1))"
-    new = (
-        "_n_cv = min(3, len(train_clean) - 1)\n"
-        "if _n_cv >= 2 and len(train_clean) >= 3:\n"
-        "    tscv = TimeSeriesSplit(n_splits=_n_cv)"
+    return src
+
+
+def _patch_split_calvings_lact(src: str) -> str:
+    """Cell 3/7: LACT из Lact; если лактация не заполнена — эвристика 85/15."""
+    old = (
+        "    df['LACT'] = df['LACT'].fillna(0)\n\n"
+        "    cows = df[df['LACT'] >= 2].copy()\n"
+        "    heifers = df[df['LACT'] == 1].copy()\n\n"
+        "    return cows, heifers"
     )
-    if old in src and "_n_cv = min(3, len(train_clean)" not in src:
-        src = src.replace(old, new, 1)
+    new = (
+        "    if 'LACT' not in df.columns and 'Lact' in df.columns:\n"
+        "        df['LACT'] = df['Lact']\n"
+        "    df['LACT'] = pd.to_numeric(df.get('LACT', 0), errors='coerce').fillna(0)\n\n"
+        "    cows = df[df['LACT'] >= 2].copy()\n"
+        "    heifers = df[df['LACT'] == 1].copy()\n"
+        "    if len(cows) == 0 and len(heifers) == 0 and len(df) > 0:\n"
+        "        n_h = max(1, int(round(len(df) * 0.15)))\n"
+        "        heifers = df.iloc[:n_h].copy()\n"
+        "        cows = df.iloc[n_h:].copy()\n\n"
+        "    return cows, heifers"
+    )
+    if old in src:
+        src = src.replace(old, new)
     return src
 
 
@@ -1017,8 +1064,9 @@ def _patch_cell25_vectorize(src: str) -> str:
     return df_params
 '''
     start = src.index("def calculate_parameters(df):")
-    end = src.index("df_params = calculate_parameters(df)") + len("df_params = calculate_parameters(df)")
-    return src[:start] + new_fn + "\n\n" + src[end:]
+    assign = "df_params = calculate_parameters(df)"
+    end = src.index(assign)
+    return src[:start] + new_fn + "\n\n" + assign + "\n" + src[end + len(assign) :]
 
 
 def _patch_cell25_train_test_split(src: str, cfg: PipelineConfig) -> str:
@@ -1161,6 +1209,7 @@ def patch_cell_source(src: str, cfg: PipelineConfig) -> str:
     src = _patch_semen_remark_in_folder_files(src)
     src = _patch_birth_event_rozhd(src)
     src = _patch_calving_event_types(src)
+    src = _patch_split_calvings_lact(src)
     src = _patch_gridsearch_min_samples(src)
     src = _apply_trade_patches(src, cfg)
     src = _patch_cell23_vectorize(src)
@@ -1519,9 +1568,21 @@ def _patch_lact_and_death_events(src: str) -> str:
     )
     src = src.replace(
         "death_mask = df['Событие'].str.upper().str.strip() == 'ПАЛА'",
-        "death_mask = df['Событие'].astype(str).str.upper().str.strip().isin(['ПАЛА', 'DIED', 'ПАЛ'])",
+        "death_mask = df['Событие'].astype(str).str.upper().str.strip().isin("
+        "['ПАЛА', 'DIED', 'ПАЛ', 'DEAD', 'MORT', 'ПАДЕЖ'])",
     )
-    if "df_culling_2022 = pd.read_excel" in src and "_ensure_lact_col" not in src:
+    src = src.replace(
+        "        return pd.DataFrame(columns=['год', 'месяц', 'дата_месяц', 'падеж_телочки', 'падеж_бычки'])",
+        "        return pd.DataFrame(columns=['год', 'месяц', 'дата_месяц', 'падеж_телочки', 'падеж_бычки', 'падеж_всего'])",
+    )
+    src = src.replace(
+        "print(f\"\\nВсего месяцев: {len(monthly_deaths)}\")\n"
+        "print(f\"Всего падежей: {monthly_deaths['падеж_всего'].sum():.0f}\")",
+        "print(f\"\\nВсего месяцев: {len(monthly_deaths)}\")\n"
+        "_death_total = monthly_deaths['падеж_всего'].sum() if len(monthly_deaths) else 0\n"
+        "print(f\"Всего падежей: {_death_total:.0f}\")",
+    )
+    if ("df_culling_2022 = pd.read_excel" in src or "df_culling_2022 = read_filter_excel" in src) and "_ensure_lact_col" not in src:
         helper = (
             "\ndef _ensure_lact_col(df):\n"
             "    if df is None or len(df) == 0:\n"
@@ -1533,10 +1594,23 @@ def _patch_lact_and_death_events(src: str) -> str:
         )
         src = helper + src
         for yr in (2022, 2023, 2024, 2025):
-            src = src.replace(
-                f"df_culling_{yr} = pd.read_excel(f\"{{folder}}/Выбытие_{yr}.xlsx\")",
-                f"df_culling_{yr} = _ensure_lact_col(pd.read_excel(f\"{{folder}}/Выбытие_{yr}.xlsx\"))",
-            )
+            for reader in ("pd.read_excel", "read_filter_excel"):
+                old = f"df_culling_{yr} = {reader}(f\"{{folder}}/Выбытие_{yr}.xlsx\")"
+                if old in src:
+                    src = src.replace(
+                        old,
+                        f"df_culling_{yr} = _ensure_lact_col({reader}(f\"{{folder}}/Выбытие_{yr}.xlsx\"))",
+                    )
+    src = src.replace(
+        "print(f\"  Из них сухостойные: {total_suh} ({total_suh/total_furazh*100:.1f}%)\")\n"
+        "print(f\"  Из них дойные: {total_doy} ({total_doy/total_furazh*100:.1f}%)\")",
+        "if total_furazh:\n"
+        "    print(f\"  Из них сухостойные: {total_suh} ({total_suh/total_furazh*100:.1f}%)\")\n"
+        "    print(f\"  Из них дойные: {total_doy} ({total_doy/total_furazh*100:.1f}%)\")\n"
+        "else:\n"
+        "    print(f\"  Из них сухостойные: {total_suh}\")\n"
+        "    print(f\"  Из них дойные: {total_doy}\")",
+    )
     return src
 
 

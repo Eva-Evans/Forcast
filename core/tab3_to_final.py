@@ -320,9 +320,10 @@ def _dry_to_final(df: pd.DataFrame) -> pd.DataFrame:
 
 def _disp_to_final(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
-        return pd.DataFrame(columns=["REG", "Дата", "Событие", "REM", "Куда", "ID"])
+        return pd.DataFrame(columns=["REG", "Дата", "Событие", "REM", "Куда", "ID", "LACT", "Lact"])
     reg = df.get("reg", pd.Series(dtype=object)).astype(str)
     reason = df.get("disposal_reason", pd.Series(dtype=object)).astype(str)
+    lact = pd.to_numeric(df.get("lact"), errors="coerce").fillna(0).astype(int)
     return pd.DataFrame(
         {
             "REG": reg,
@@ -331,6 +332,8 @@ def _disp_to_final(df: pd.DataFrame) -> pd.DataFrame:
             "REM": reason,
             "Куда": reason,
             "ID": reg,
+            "LACT": lact,
+            "Lact": lact,
         }
     )
 
