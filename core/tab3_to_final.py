@@ -323,7 +323,9 @@ def _disp_to_final(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=["REG", "Дата", "Событие", "REM", "Куда", "ID", "LACT", "Lact"])
     reg = df.get("reg", pd.Series(dtype=object)).astype(str)
     reason = df.get("disposal_reason", pd.Series(dtype=object)).astype(str)
-    lact = pd.to_numeric(df.get("lact"), errors="coerce").fillna(0).astype(int)
+    lact = pd.to_numeric(
+        df.get("lact", pd.Series(0, index=df.index)), errors="coerce"
+    ).fillna(0).astype(int)
     return pd.DataFrame(
         {
             "REG": reg,
