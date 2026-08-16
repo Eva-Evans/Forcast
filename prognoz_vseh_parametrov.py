@@ -771,6 +771,134 @@ def _patch_predict_months_loops(src: str) -> str:
     return src
 
 
+def _anchor_is_sep2024(train_end: pd.Timestamp) -> bool:
+    te = pd.Timestamp(train_end).normalize()
+    return int(te.year) == 2024 and int(te.month) == 9
+
+
+def _expand_year_concat(
+    src: str,
+    line_for_year: str,
+    *,
+    start_year: int = 2022,
+    end_year: int = 2024,
+    base_end_year: int = 2024,
+) -> str:
+    """Расширить pd.concat([...2022..base_end_year...]) до end_year."""
+    if end_year <= base_end_year:
+        return src
+    old_lines = "\n".join(f"    {line_for_year.format(y=y)}," for y in range(start_year, base_end_year + 1))
+    new_lines = "\n".join(f"    {line_for_year.format(y=y)}," for y in range(start_year, end_year + 1))
+    old = "[\n" + old_lines + "\n]"
+    new = "[\n" + new_lines + "\n]"
+    if old in src:
+        src = src.replace(old, new)
+    return src
+
+
+def _patch_dynamic_training_years(src: str, cfg: PipelineConfig) -> str:
+    """Загрузка filter-файлов и concat обучения через train_end.year (не только 2022–2024)."""
+    end_year = int(cfg.resolved_train_end().year)
+    if "_DYN_TRAIN_YEARS_PATCH" in src:
+        return src
+
+    load_marker = 'df_culling_2024 = read_filter_excel(f"{folder}/Выбытие_2024.xlsx")'
+    if load_marker in src and end_year >= 2025:
+        extra_loads: list[str] = ["# --- _DYN_TRAIN_YEARS_PATCH ---"]
+        for y in range(2025, end_year + 1):
+            if y == 2025 and "df_calvings_2025 = read_filter_excel" in src:
+                pass
+            else:
+                extra_loads.append(
+                    f'_p = Path(folder) / "Отелы_{y}.xlsx"\n'
+                    f"df_calvings_{y} = read_filter_excel(_p) if _p.is_file() else pd.DataFrame()"
+                )
+            extra_loads.append(
+                f'_p = Path(folder) / "Осеменения_{y}.xlsx"\n'
+                f"df_semen_{y} = read_filter_excel(_p) if _p.is_file() else pd.DataFrame()"
+            )
+            extra_loads.append(
+                f'_p = Path(folder) / "Запуск_{y}.xlsx"\n'
+                f"df_dry_{y} = read_filter_excel(_p) if _p.is_file() else pd.DataFrame()"
+            )
+            extra_loads.append(
+                f'_p = Path(folder) / "Выбытие_{y}.xlsx"\n'
+                f"df_culling_{y} = read_filter_excel(_p) if _p.is_file() else pd.DataFrame()"
+            )
+        src = src.replace(load_marker, load_marker + "\n" + "\n".join(extra_loads))
+
+    proc_marker = "df_semen_2024_proc = process_c_semen(df_semen_2024)"
+    if proc_marker in src and end_year >= 2025:
+        extra_proc = "\n".join(
+            f"df_semen_{y}_proc = process_c_semen(df_semen_{y})"
+            for y in range(2025, end_year + 1)
+        )
+        src = src.replace(proc_marker, proc_marker + "\n" + extra_proc)
+
+    src = _expand_year_concat(
+        src,
+        "aggregate_calvings_monthly(df_calvings_{y}, MAX_DATE)",
+        end_year=end_year,
+    )
+    src = _expand_year_concat(
+        src,
+        "aggregate_dry_monthly(df_dry_{y}, MAX_DATE)",
+        end_year=end_year,
+    )
+    src = _expand_year_concat(
+        src,
+        "aggregate_culling_monthly(df_culling_{y}, MAX_DATE)",
+        end_year=end_year,
+    )
+    src = _expand_year_concat(
+        src,
+        "aggregate_semen_monthly(df_semen_{y}_proc, MAX_DATE)",
+        end_year=end_year,
+    )
+    src = _expand_year_concat(
+        src,
+        "filter_by_date(df_semen_{y}_proc, MAX_DATE_PROB)",
+        end_year=end_year,
+    )
+    src = _expand_year_concat(
+        src,
+        "aggregate_calvings_split_monthly(df_calvings_{y}, MAX_DATE)",
+        end_year=end_year,
+    )
+    src = _expand_year_concat(
+        src,
+        "aggregate_dry_shifted(df_dry_{y}, period, MAX_DATE)",
+        end_year=end_year,
+    )
+    src = _expand_year_concat(
+        src,
+        "aggregate_culling_by_lactation_monthly(df_culling_{y}, MAX_DATE_TRAIN)",
+        end_year=end_year,
+    )
+    src = _expand_year_concat(
+        src,
+        "aggregate_calvings_monthly(df_calvings_{y}, MAX_DATE_TRAIN)",
+        end_year=end_year,
+    )
+    src = _expand_year_concat(
+        src,
+        "aggregate_semen_monthly(df_semen_{y}, MAX_DATE_TRAIN)",
+        end_year=end_year,
+    )
+    src = _expand_year_concat(
+        src,
+        "aggregate_dry_monthly(df_dry_{y}, MAX_DATE_TRAIN)",
+        end_year=end_year,
+    )
+
+    old_semen_proc = "[\n    df_semen_2022_proc, df_semen_2023_proc, df_semen_2024_proc\n]"
+    if end_year >= 2025 and old_semen_proc in src:
+        new_parts = ", ".join(f"df_semen_{y}_proc" for y in range(2022, end_year + 1))
+        src = src.replace(old_semen_proc, f"[\n    {new_parts}\n]")
+
+    return src
+
+
 def _patch_cell10_furazh_baseline(src: str, baseline: dict[str, float] | None) -> str:
     """Если furazh_forecast пуст (cell 12 ещё не считался) — база с якоря."""
     if not baseline or baseline.get("furazh") is None:
@@ -1235,6 +1363,7 @@ def patch_cell_source(src: str, cfg: PipelineConfig) -> str:
     src = _patch_cell25_train_test_split(src, cfg)
     src = _patch_cell25_trade_and_features(src)
     src = src.replace('pd.read_excel(f"{folder}/', 'read_filter_excel(f"{folder}/')
+    src = _patch_dynamic_training_years(src, cfg)
     train_end = cfg.resolved_train_end()
     train_end_s = train_end.strftime('%Y-%m-%d')
     src = re.sub(r"MAX_DATE_PROB = pd\.Timestamp\('[^']+'\)", f"MAX_DATE_PROB = pd.Timestamp('{train_end_s}')", src)
@@ -1776,10 +1905,12 @@ def apply_sep2024_baseline_to_stock_fact(
     return df
 
 
-def furazh_base_sep_2024(cfg: PipelineConfig, stock_fact: pd.DataFrame | None = None) -> int:
-    """База фуражных на сен 2024: сначала факт 30.09.2024, иначе снимок/лактации."""
+def furazh_base_at_train_end(cfg: PipelineConfig, stock_fact: pd.DataFrame | None = None) -> int:
+    """База фуражных на конец месяца train_end: baseline → снимок → lactation_stock."""
     if cfg.sep2024_baseline and cfg.sep2024_baseline.get("furazh"):
         return int(round(float(cfg.sep2024_baseline["furazh"])))
+    te = cfg.resolved_train_end()
+    ay, am = int(te.year), int(te.month)
     df = stock_fact
     if not isinstance(df, pd.DataFrame) or df.empty:
         try:
@@ -1787,11 +1918,12 @@ def furazh_base_sep_2024(cfg: PipelineConfig, stock_fact: pd.DataFrame | None = 
         except Exception:
             df = pd.DataFrame()
     if isinstance(df, pd.DataFrame) and not df.empty:
-        row = df[(df["год"] == 2024) & (df["месяц"] == 9)]
+        row = df[(df["год"] == ay) & (df["месяц"] == am)]
         if len(row):
             if "фуражные" in row.columns and pd.notna(row["фуражные"].iloc[0]):
                 return int(round(float(row["фуражные"].iloc[0])))
-            return int(round(float(row["сухостойные"].iloc[0]) + float(row["дойные"].iloc[0])))
+            if "сухостойные" in row.columns and "дойные" in row.columns:
+                return int(round(float(row["сухостойные"].iloc[0]) + float(row["дойные"].iloc[0])))
     if not cfg.lactation_path.exists():
         return 2909
     lact = pd.read_excel(cfg.lactation_path)
@@ -1799,29 +1931,78 @@ def furazh_base_sep_2024(cfg: PipelineConfig, stock_fact: pd.DataFrame | None = 
     if not cols:
         return 2909
     if "год" in lact.columns and "месяц" in lact.columns:
-        row = lact[(lact["год"] == 2024) & (lact["месяц"] == 9)]
+        row = lact[(lact["год"] == ay) & (lact["месяц"] == am)]
         if len(row):
             return int(row[cols].sum(axis=1).iloc[0])
     return 2909
 
 
-def _patch_cell10_dry_sep2024_baseline(src: str, baseline: dict[str, float] | None) -> str:
-    """Стартовый сухостой для прогноза = факт 30.09.2024 (если есть в базе)."""
+def furazh_base_sep_2024(cfg: PipelineConfig, stock_fact: pd.DataFrame | None = None) -> int:
+    """Alias для совместимости с finál-ячейками (FURAZH_BASE_SEP_2024)."""
+    return furazh_base_at_train_end(cfg, stock_fact)
+
+
+def _patch_cell10_dry_anchor_baseline(
+    src: str,
+    baseline: dict[str, float] | None,
+    train_end: pd.Timestamp,
+) -> str:
+    """Стартовый сухостой для прогноза = остаток на конец месяца train_end (лаги ML)."""
     if not baseline or baseline.get("dry") is None:
         return src
     dry = int(round(float(baseline["dry"])))
-    old = "suhostoynye_prev = df_train_months.iloc[-1]['сухостойные']"
-    new = (
-        f"suhostoynye_prev = {dry}  # факт 30.09.2024 из базы\n"
-        f'print(f"  Сухостойных на сентябрь 2024 (база 30.09.2024): {dry}")'
+    ay, am = int(train_end.year), int(train_end.month)
+    old_block = (
+        "forecasts_suhostoynye = {}\n"
+        "forecasts_doynye = {}\n\n"
+        "# Начальное значение: сухостойные на сентябрь 2024 (из расчета)\n"
+        "suhostoynye_prev = df_train_months.iloc[-1]['сухостойные']"
     )
+    new_block = (
+        "forecasts_suhostoynye = {}\n"
+        "forecasts_doynye = {}\n\n"
+        f"# База сухостойных на конец {ay}-{am:02d} (ручной ввод / lactation)\n"
+        f"_anchor_y, _anchor_m = {ay}, {am}\n"
+        '_df_anchor = (df_train_months["год"] == _anchor_y) & (df_train_months["месяц"] == _anchor_m)\n'
+        "if _df_anchor.any():\n"
+        f'    df_train_months.loc[_df_anchor, "сухостойные"] = {dry}\n'
+        f"forecasts_suhostoynye[(_anchor_y, _anchor_m)] = {dry}\n"
+        f"suhostoynye_prev = {dry}\n"
+        f'print(f"  Сухостойных на {ay}-{am:02d} (база поголовья): {{suhostoynye_prev}}")'
+    )
+    if old_block in src:
+        return src.replace(old_block, new_block, 1)
+    old = "suhostoynye_prev = df_train_months.iloc[-1]['сухостойные']"
     if old in src:
-        src = src.replace(old, new, 1)
+        seed = (
+            f"_anchor_y, _anchor_m = {ay}, {am}\n"
+            f"forecasts_suhostoynye[(_anchor_y, _anchor_m)] = {dry}\n"
+            f"suhostoynye_prev = {dry}  # база на конец {ay}-{am:02d}\n"
+            f'print(f"  Сухостойных на {ay}-{am:02d} (база поголовья): {{suhostoynye_prev}}")'
+        )
+        src = src.replace(old, seed, 1)
     return src
 
 
-def _patch_cell20_lact_sep2024_baseline(src: str, baseline: dict[str, float] | None) -> str:
-    """L1–L5+ на сен 2024 из базы 30.09.2024 (не из файла Высокого / дефолтов)."""
+def _merge_anchor_baseline(
+    manual: dict[str, float] | None,
+    auto: dict[str, float] | None,
+) -> dict[str, float] | None:
+    """Ручной ввод перекрывает авто-базу; недостающие поля берутся из lactation."""
+    if not manual and not auto:
+        return None
+    merged: dict[str, float] = dict(auto or {})
+    if manual:
+        merged.update(manual)
+    return merged or None
+
+
+def _patch_cell20_lact_anchor_baseline(
+    src: str,
+    baseline: dict[str, float] | None,
+    train_end: pd.Timestamp,
+) -> str:
+    """L1–L5+ на конец месяца train_end (не дефолты finál / сен 2024)."""
     need = ("L1", "L2", "L3", "L4", "L5+")
     if not baseline or any(baseline.get(k) is None for k in need):
         return src
@@ -1839,8 +2020,9 @@ def _patch_cell20_lact_sep2024_baseline(src: str, baseline: dict[str, float] | N
         "else:\n"
         "    prev_values = {'L1': 633, 'L2': 834, 'L3': 527, 'L4': 334, 'L5+': 266}\n"
     )
+    ay, am = int(train_end.year), int(train_end.month)
     new = (
-        "# База L1–L5+ на 30.09.2024 (Forecast / база_30.09.2024_поголовье.xlsx)\n"
+        f"# База L1–L5+ на конец {ay}-{am:02d}\n"
         "prev_values = {\n"
         f"    'L1': {vals['L1']},\n"
         f"    'L2': {vals['L2']},\n"
@@ -1848,7 +2030,7 @@ def _patch_cell20_lact_sep2024_baseline(src: str, baseline: dict[str, float] | N
         f"    'L4': {vals['L4']},\n"
         f"    'L5+': {vals['L5+']},\n"
         "}\n"
-        'print("  (L1–L5+ из базы факт 30.09.2024)")\n'
+        f'print("  (L1–L5+ из базы поголовья на {ay}-{am:02d})")\n'
     )
     if old in src:
         return src.replace(old, new, 1)
@@ -2268,29 +2450,50 @@ def run_pipeline(cfg: PipelineConfig) -> tuple[pd.DataFrame, pd.DataFrame]:
         f"месяцы {[f'{y}-{m:02d}' for y, m in predict_months]}"
     )
     try:
+        train_end = cfg.resolved_train_end()
         try:
-            train_end = cfg.resolved_train_end()
-            if cfg.sep2024_baseline is None and cfg.kaluga_farm and cfg.kaluga_unit:
+            anchor_label = f"{int(train_end.year)}-{int(train_end.month):02d}"
+            ns["state_dry_milk_fact"] = load_dry_milk_monthly_fact(cfg)
+            manual_baseline = cfg.sep2024_baseline
+            lact_baseline = None
+            if cfg.lactation_path.exists():
+                lact_probe = pd.read_excel(cfg.lactation_path)
+                lact_baseline = baseline_from_lactation_at_train_end(
+                    lact_probe,
+                    train_end,
+                    ns["state_dry_milk_fact"],
+                )
+            cfg.sep2024_baseline = _merge_anchor_baseline(manual_baseline, lact_baseline)
+            if (
+                cfg.sep2024_baseline is None
+                and _anchor_is_sep2024(train_end)
+                and cfg.kaluga_farm
+                and cfg.kaluga_unit
+            ):
                 cfg.sep2024_baseline = load_sep2024_baseline(
                     cfg.kaluga_farm, cfg.kaluga_unit, cfg.baseline_xlsx
                 )
-            if cfg.sep2024_baseline is None and cfg.lactation_path.exists():
-                lact_probe = pd.read_excel(cfg.lactation_path)
-                cfg.sep2024_baseline = baseline_from_lactation_at_train_end(lact_probe, train_end)
-            ns["state_dry_milk_fact"] = load_dry_milk_monthly_fact(cfg)
+            if manual_baseline and cfg.sep2024_baseline:
+                print(
+                    f"📋 База поголовья: ручной ввод + авто ({anchor_label}), "
+                    f"поля: {', '.join(sorted(cfg.sep2024_baseline))}"
+                )
             ns["state_dry_milk_fact"] = apply_sep2024_baseline_to_stock_fact(
                 ns["state_dry_milk_fact"],
                 cfg.sep2024_baseline,
                 anchor=train_end,
             )
-            sep = furazh_base_sep_2024(cfg, ns["state_dry_milk_fact"])
-            src_label = "база 30.09.2024" if cfg.sep2024_baseline else "из таблиц"
+            furazh_base = furazh_base_at_train_end(cfg, ns["state_dry_milk_fact"])
+            if cfg.sep2024_baseline:
+                src_label = f"база на {anchor_label}"
+            else:
+                src_label = "из таблиц"
             print(
                 f"Факт снимка (сух/дой/фур): {len(ns['state_dry_milk_fact'])} мес.; "
-                f"FURAZH_BASE сен 2024 = {sep} ({src_label})"
+                f"FURAZH_BASE {anchor_label} = {furazh_base} ({src_label})"
             )
             if cfg.sep2024_baseline:
-                detail.kv(2, **{f"sep2024_{k}": v for k, v in cfg.sep2024_baseline.items()})
+                detail.kv(2, **{f"anchor_{k}": v for k, v in cfg.sep2024_baseline.items()})
         except Exception as exc:  # noqa: BLE001
             print(f"⚠️ Факт сухостойных из снимка: {exc}")
             ns["state_dry_milk_fact"] = pd.DataFrame()
@@ -2323,7 +2526,7 @@ def run_pipeline(cfg: PipelineConfig) -> tuple[pd.DataFrame, pd.DataFrame]:
                 inj["culling_forecast"] = ns.get("state_culling", {})
                 src = re.sub(
                     r"FURAZH_BASE_SEP_2024\s*=\s*\d+",
-                    f"FURAZH_BASE_SEP_2024 = {furazh_base_sep_2024(cfg, ns.get('state_dry_milk_fact'))}",
+                    f"FURAZH_BASE_SEP_2024 = {furazh_base_at_train_end(cfg, ns.get('state_dry_milk_fact'))}",
                     src,
                 )
             if cell_id == 3:
@@ -2333,7 +2536,7 @@ def run_pipeline(cfg: PipelineConfig) -> tuple[pd.DataFrame, pd.DataFrame]:
             if cell_id == 10:
                 inj["furazh_forecast"] = ns.get("state_furazh_forecast", ns.get("state_furazh_balance", {}))
                 src = _patch_cell10_dry_fact_from_snapshot(src, cfg)
-                src = _patch_cell10_dry_sep2024_baseline(src, cfg.sep2024_baseline)
+                src = _patch_cell10_dry_anchor_baseline(src, cfg.sep2024_baseline, train_end)
                 src = _patch_cell10_furazh_baseline(src, cfg.sep2024_baseline)
             if cell_id == 16:
                 inj["culling_forecast"] = ns.get("state_culling", {})
@@ -2342,7 +2545,7 @@ def run_pipeline(cfg: PipelineConfig) -> tuple[pd.DataFrame, pd.DataFrame]:
                 inj["calving_forecast"] = ns.get("state_calving_scalar", {})
             if cell_id == 20:
                 inj["furazh_forecast"] = ns.get("state_furazh_balance", {})
-                src = _patch_cell20_lact_sep2024_baseline(src, cfg.sep2024_baseline)
+                src = _patch_cell20_lact_anchor_baseline(src, cfg.sep2024_baseline, train_end)
                 if not cfg.lactation_path.exists():
                     print(f"⚠️ Нет {cfg.lactation_path} — пропуск ячейки 20")
                     continue
