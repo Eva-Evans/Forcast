@@ -2575,6 +2575,10 @@ def run_young_stock(cfg: PipelineConfig) -> tuple[pd.DataFrame, pd.DataFrame]:
     pred_df = pd.DataFrame(pred_rows)
 
     if cfg.forecast_only:
+        print(
+            f"  [молодняк] история обучения: {len(train_df)} мес. до {train_end.date()}, "
+            f"прогноз: {len(pred_df)} мес. (лист «факт» для сравнения не строится)"
+        )
         return pd.DataFrame(columns=["год", "месяц"] + snap.YOUNG_AND_NETELI_KEYS), pred_df
 
     fact_rows = df[
@@ -2759,7 +2763,7 @@ def run_pipeline(cfg: PipelineConfig) -> tuple[pd.DataFrame, pd.DataFrame]:
             fact_young, pred_young = run_young_stock(cfg)
             ns["state_young_fact"] = fact_young
             ns["state_young_pred"] = pred_young
-            detail.kv(young_fact_rows=len(fact_young), young_pred_rows=len(pred_young))
+            detail.kv(young_compare_fact_rows=len(fact_young), young_pred_rows=len(pred_young))
             detail.line("  Статус: OK")
         except Exception as exc:  # noqa: BLE001
             detail.line(f"  Статус: ОШИБКА — {exc}")

@@ -262,13 +262,16 @@ def export_bulls_workbook(tables: dict[str, pd.DataFrame], path: Path) -> Path:
 
 
 def _calv_event_col(df: pd.DataFrame) -> pd.Series:
-    """Событие для Отелы_YYYY: нормализация CALVING/РОЖД → ОТЕЛ."""
+    """Событие для Отелы_YYYY: рождения → РОЖД, отёлы коров → ОТЕЛ."""
     raw = df.get("event_type", pd.Series("", index=df.index)).astype(str).str.strip().str.upper()
     raw = raw.str.replace("Ё", "Е", regex=False)
     empty = raw.isna() | raw.isin(("", "NAN", "NONE", "NAT"))
     raw = raw.where(~empty, "ОТЕЛ")
-    calv = raw.str.contains("CALV|ОТЕЛ|РОЖ|BORN|BIRTH", na=False)
-    return raw.where(~calv, "ОТЕЛ")
+    birth = raw.str.contains(r"^(РОЖД\.?|РОЖДЕН)$|BORN|BIRTH", na=False, regex=True)
+    calv = raw.str.contains(r"CALV|ОТЕЛ", na=False, regex=True) & ~birth
+    out = raw.where(~calv, "ОТЕЛ")
+    out = out.where(~birth, "РОЖД")
+    return out
 
 
 def _calv_to_final(df: pd.DataFrame) -> pd.DataFrame:

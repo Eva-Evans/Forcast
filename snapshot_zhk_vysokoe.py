@@ -118,9 +118,12 @@ def excel_to_backtest_tables(raw: dict[str, pd.DataFrame]) -> dict[str, pd.DataF
             "event_type": calv_raw.get("Событие", calv_raw.get("Event", pd.Series(dtype=object))),
             "sex": calv_raw.get("GNDR", calv_raw.get("Пол", pd.Series(dtype=object))),
             "mother_reg": calv_raw.get("DREG1", calv_raw.get("DREG", pd.Series(dtype=object))),
+            "lact": pd.to_numeric(calv_raw.get("LACT", calv_raw.get("Lact")), errors="coerce"),
         })
     else:
-        calv_df = pd.DataFrame(columns=["reg", "event_date", "birth_date", "event_type", "sex", "mother_reg"])
+        calv_df = pd.DataFrame(
+            columns=["reg", "event_date", "birth_date", "event_type", "sex", "mother_reg", "lact"]
+        )
 
     def _simple_event(df_raw: pd.DataFrame, with_lact: bool = False, with_result: bool = False) -> pd.DataFrame:
         if df_raw is None or df_raw.empty:
@@ -252,8 +255,22 @@ def _actual_nonbirth_snapshot_from_tables(
         calv["reg_s"] = calv.get("reg", pd.Series(dtype=object)).map(_norm_id)
         calv["mother_reg_s"] = calv.get("mother_reg", pd.Series(dtype=object)).map(_norm_id)
         calv["sex_norm"] = calv.get("sex", pd.Series(dtype=object)).map(_norm_sex_marker_backtest)
+        calv["lact"] = pd.to_numeric(calv.get("lact"), errors="coerce")
         calv = calv[(calv["event_date_n"].notna()) & (calv["event_date_n"] <= as_of_ts)]
-        born = calv.loc[calv["event_type_n"].isin(["РОЖД", "РОЖД.", "РОЖДЕН"])].copy()
+        birth_types = ("РОЖД", "РОЖД.", "РОЖДЕН")
+        born = calv.loc[calv["event_type_n"].isin(birth_types)].copy()
+        # Запасной путь: если в filter_* уже лежит ОТЕЛ вместо РОЖД (старый экспорт)
+        if "lact" in calv.columns:
+            _lact0 = pd.to_numeric(calv["lact"], errors="coerce").fillna(0).astype(int) == 0
+        else:
+            _lact0 = pd.Series(True, index=calv.index)
+        born_fallback = calv.loc[
+            (calv["event_type_n"] == "ОТЕЛ") & _lact0 & calv["sex_norm"].isin(["F", "M"])
+        ].copy()
+        if not born_fallback.empty:
+            born = pd.concat([born, born_fallback], ignore_index=True).drop_duplicates(
+                subset=["reg_s", "event_date_n"], keep="first"
+            )
     else:
         born = pd.DataFrame()
 
