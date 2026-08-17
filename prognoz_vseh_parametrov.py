@@ -1138,6 +1138,9 @@ def _patch_cell25_trade_and_features(src: str) -> str:
     )
     src = src.replace(
         "    dry = df_raw[df_raw['Событие'].str.strip() == 'ЗАПУСК']\n",
+        "    dry = df_raw[_ev == 'DRY']\n",
+    )
+    src = src.replace(
         "    dry = df_raw[_ev.isin(('ЗАПУСК', 'DRY'))]\n",
         "    dry = df_raw[_ev == 'DRY']\n",
     )
