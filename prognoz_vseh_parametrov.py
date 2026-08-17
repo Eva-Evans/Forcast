@@ -679,15 +679,11 @@ _CALVING_COW_EVENT_ISIN = (
 
 
 def _patch_calving_event_types(src: str) -> str:
-    """Finál cells 1/3/7/10: распознавание отёлов из Калуги (CALVING, РОЖД, …)."""
+    """Finál cells 1/3/7/10: отёлы = только ОТЕЛ/CALVING (без РОЖД — это приплод)."""
     old_otel = (
         "otel_mask = df['Событие'].str.upper().str.strip().isin(['ОТЕЛ', 'ОТЁЛ', 'CALVING', 'ОТЕЛЕНИЕ'])"
     )
-    new_otel = (
-        f"otel_mask = {_CALVING_EVENT_ISIN}\n"
-        "    if not otel_mask.any() and len(df) > 0 and 'Дата' in df.columns:\n"
-        "        otel_mask = pd.to_datetime(df['Дата'], errors='coerce').notna()"
-    )
+    new_otel = f"otel_mask = {_CALVING_COW_EVENT_ISIN}"
     src = src.replace(old_otel, new_otel)
     src = src.replace(
         "df_calving_cows_train = df_events_train[(df_events_train['Событие'] == 'ОТЕЛ') &\n"
@@ -936,6 +932,16 @@ def _patch_predict_months_loops(src: str) -> str:
     """Finál cells: горизонт прогноза из _PREDICT_MONTHS (UI), не Oct2024–Dec2025."""
     if _PREDICT_MONTHS_BLOCK in src:
         src = src.replace(_PREDICT_MONTHS_BLOCK, "predict_months = list(_PREDICT_MONTHS)")
+    return src
+
+
+def _patch_cell5_predict_horizon(src: str) -> str:
+    """Яч. 5 (приплод): цикл прогноза на _PREDICT_MONTHS, не Oct2024–Dec2025."""
+    old_loop = (
+        "for year, month in [(2024, m) for m in [10,11,12]] + [(2025, m) for m in range(1,13)]:"
+    )
+    if old_loop in src:
+        src = src.replace(old_loop, "for year, month in _PREDICT_MONTHS:")
     return src
 
 
@@ -1504,6 +1510,7 @@ def patch_cell_source(src: str, cfg: PipelineConfig) -> str:
     src = _patch_calving_event_types(src)
     src = _patch_split_calvings_lact(src)
     src = _patch_predict_months_loops(src)
+    src = _patch_cell5_predict_horizon(src)
     src = _patch_gridsearch_min_samples(src)
     src = _patch_cell18_empty_train(src)
     src = src.replace("n_jobs=-1", "n_jobs=1")
