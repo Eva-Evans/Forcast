@@ -231,19 +231,30 @@ def _fallback_inseminations(df_raw: pd.DataFrame) -> pd.DataFrame:
         }
     )
 
+def _extract_lact_col(df: pd.DataFrame) -> pd.Series:
+    if "lact" in df.columns:
+        return pd.to_numeric(df["lact"], errors="coerce")
+    if "LACT" in df.columns:
+        return pd.to_numeric(df["LACT"], errors="coerce")
+    return pd.Series([pd.NA] * len(df), index=df.index)
+
+
 def _fallback_disposals(df_raw: pd.DataFrame) -> pd.DataFrame:
     reg_c = _find_col(df_raw, "REG", "DREG", "IDREG")
     date_c = _find_col(df_raw, "DATE", "EVENT_DATE", "ДАТА")
-    reason_c = _find_col(df_raw, "REMARK", "DISPOSAL_REASON", "REM", "ПРИЧИНА ВЫБЫТИЯ")
+    reason_c = _find_col(df_raw, "EVENT", "EVENT_TYPE", "REMARK", "DISPOSAL_REASON", "REM", "ПРИЧИНА ВЫБЫТИЯ")
+    lact_c = _find_col(df_raw, "LACT", "LACTATION")
 
     if reg_c is None or date_c is None:
         raise ValueError("Не нашёл REG/DATE в файле выбытия.")
 
+    reason = df_raw[reason_c].astype(str).str.strip() if reason_c else ""
     return pd.DataFrame(
         {
             "reg": df_raw[reg_c].map(_norm_id),
             "event_date": _to_dt(df_raw[date_c]),
-            "disposal_reason": df_raw[reason_c].astype(str).str.strip() if reason_c else "",
+            "disposal_reason": reason,
+            "lact": pd.to_numeric(df_raw[lact_c], errors="coerce") if lact_c else pd.NA,
         }
     )
 
@@ -251,17 +262,18 @@ def _fallback_dryoff(df_raw: pd.DataFrame) -> pd.DataFrame:
     reg_c = _find_col(df_raw, "REG", "DREG", "IDREG")
     date_c = _find_col(df_raw, "DATE", "EVENT_DATE", "ДАТА")
     dim_c = _find_col(df_raw, "DIM", "ВОЗРАСТ", "DIM_AGE", "DAYS")
-    reason_c = _find_col(df_raw, "CARX", "ПРИЧИНА ВЫБЫТИЯ", "REASON", "REM", "REMARK")
+    reason_c = _find_col(df_raw, "EVENT", "EVENT_TYPE", "CARX", "ПРИЧИНА ВЫБЫТИЯ", "REASON", "REM", "REMARK")
 
     if reg_c is None or date_c is None:
         raise ValueError("Не нашёл REG/DATE в файле запусков.")
 
+    reason = df_raw[reason_c].astype(str).str.strip() if reason_c else ""
     return pd.DataFrame(
         {
             "reg": df_raw[reg_c].map(_norm_id),
             "dim": pd.to_numeric(df_raw[dim_c], errors="coerce") if dim_c else pd.NA,
             "event_date": _to_dt(df_raw[date_c]),
-            "move_reason": df_raw[reason_c].astype(str).str.strip() if reason_c else "",
+            "move_reason": reason,
         }
     )
 
@@ -459,8 +471,10 @@ def _read_combined_dry_disp_excel(file_obj: Any) -> pd.DataFrame:
 def _split_dry_disp_frames(full: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Один Excel «Запуск + Выбытие»: делим по колонке события."""
     if full is None or full.empty:
-        empty_dry = pd.DataFrame(columns=["reg", "dim", "event_date", "move_reason", "__farm", "__subdivision"])
-        empty_disp = pd.DataFrame(columns=["reg", "event_date", "disposal_reason", "__farm", "__subdivision"])
+        empty_dry = pd.DataFrame(columns=["reg", "dim", "event_date", "move_reason", "lact", "__farm", "__subdivision"])
+        empty_disp = pd.DataFrame(
+            columns=["reg", "event_date", "disposal_reason", "lact", "__farm", "__subdivision"]
+        )
         return empty_dry, empty_disp
 
     work = full.copy()
@@ -485,32 +499,37 @@ def _split_dry_disp_frames(full: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFra
     elif "dim" not in dry_src.columns:
         dry_src["dim"] = pd.NA
 
-    reason_d = None
-    for c in ("disposal_reason", "remark", "note"):
-        if c in dry_src.columns:
-            reason_d = dry_src[c].astype(str)
-            break
+    dry_ev = ev.loc[dry_src.index].astype(str).str.strip().str.upper()
+    dry_ev = dry_ev.where(dry_ev.ne("") & dry_ev.ne("NAN"), "DRY")
+    dry_lact = _extract_lact_col(dry_src)
+
     dry_out = pd.DataFrame(
         {
             "reg": dry_src["reg"].map(_norm_id),
             "dim": pd.to_numeric(dry_src.get("dim"), errors="coerce"),
             "event_date": pd.to_datetime(dry_src["event_date"], errors="coerce", dayfirst=True),
-            "move_reason": reason_d if reason_d is not None else "",
+            "move_reason": dry_ev,
+            "lact": dry_lact,
             "__farm": dry_src["__farm"],
             "__subdivision": dry_src["__subdivision"],
         }
     )
 
-    reason_x = None
+    disp_ev = ev.loc[disp_src.index].astype(str).str.strip().str.upper()
+    reason_x = disp_ev.where(disp_ev.ne("") & disp_ev.ne("NAN"), pd.NA)
     for c in ("disposal_reason", "remark", "note"):
         if c in disp_src.columns:
-            reason_x = disp_src[c].astype(str).str.strip()
-            break
+            fb = disp_src[c].astype(str).str.strip()
+            reason_x = reason_x.fillna(fb.where(fb.ne("") & fb.ne("nan"), pd.NA))
+    reason_x = reason_x.fillna("ВЫБЫТИЕ")
+    disp_lact = _extract_lact_col(disp_src)
+
     disp_out = pd.DataFrame(
         {
             "reg": disp_src["reg"].map(_norm_id),
             "event_date": pd.to_datetime(disp_src["event_date"], errors="coerce", dayfirst=True),
-            "disposal_reason": reason_x if reason_x is not None else "",
+            "disposal_reason": reason_x,
+            "lact": disp_lact,
             "__farm": disp_src["__farm"],
             "__subdivision": disp_src["__subdivision"],
         }
@@ -541,10 +560,10 @@ def _read_normalized_events_table(file_obj: Any) -> pd.DataFrame:
 
 def _empty_typed_frame(kind: str) -> pd.DataFrame:
     cols = {
-        "calv": ["reg", "mother_reg", "birth_date", "sex", "event_type", "event_date", "__farm", "__subdivision"],
+        "calv": ["reg", "mother_reg", "birth_date", "sex", "event_type", "event_date", "lact", "__farm", "__subdivision"],
         "ins": ["reg", "lact", "dim_age", "event_date", "bull", "result", "__farm", "__subdivision"],
-        "dry": ["reg", "dim", "event_date", "move_reason", "__farm", "__subdivision"],
-        "disp": ["reg", "event_date", "disposal_reason", "__farm", "__subdivision"],
+        "dry": ["reg", "dim", "event_date", "move_reason", "lact", "__farm", "__subdivision"],
+        "disp": ["reg", "event_date", "disposal_reason", "lact", "__farm", "__subdivision"],
     }
     return pd.DataFrame(columns=cols[kind])
 
@@ -907,7 +926,7 @@ def _prepare_tables(bundle: FarmUploadBundle) -> dict[str, pd.DataFrame]:
         )
 
     calv_df = calv_df.copy()
-    for c in ("reg", "mother_reg", "birth_date", "sex", "event_type", "event_date", "__farm", "__subdivision"):
+    for c in ("reg", "mother_reg", "birth_date", "sex", "event_type", "event_date", "lact", "__farm", "__subdivision"):
         if c not in calv_df.columns:
             calv_df[c] = pd.NA
     calv_df["reg"] = calv_df["reg"].map(_norm_id)
@@ -943,11 +962,12 @@ def _prepare_tables(bundle: FarmUploadBundle) -> dict[str, pd.DataFrame]:
         dry_df["move_reason"] = dry_df["disposal_reason"].astype(str)
 
     disp_df = disp_df.copy()
-    for c in ("reg", "event_date", "disposal_reason", "__farm", "__subdivision"):
+    for c in ("reg", "event_date", "disposal_reason", "lact", "__farm", "__subdivision"):
         if c not in disp_df.columns:
             disp_df[c] = pd.NA
     disp_df["reg"] = disp_df["reg"].map(_norm_id)
     disp_df["event_date"] = pd.to_datetime(disp_df["event_date"], errors="coerce", dayfirst=True)
+    disp_df["lact"] = pd.to_numeric(disp_df["lact"], errors="coerce")
 
     try:
         ins_df = clean_inseminations(ins_df)
@@ -976,11 +996,17 @@ def _prepare_tables(bundle: FarmUploadBundle) -> dict[str, pd.DataFrame]:
         else pd.DataFrame(columns=["bull_code", "bull_type"])
     )
 
+    calv_df["lact"] = pd.to_numeric(calv_df.get("lact"), errors="coerce")
+
     return {
-        "calv": calv_df[["reg", "mother_reg", "birth_date", "sex", "event_type", "event_date", "__farm", "__subdivision"]].copy(),
+        "calv": calv_df[
+            ["reg", "mother_reg", "birth_date", "sex", "event_type", "event_date", "lact", "__farm", "__subdivision"]
+        ].copy(),
         "ins": ins_df[["reg", "lact", "dim_age", "event_date", "bull", "result", "__farm", "__subdivision"]].copy(),
         "dry": dry_df[["reg", "dim", "event_date", "move_reason", "__farm", "__subdivision"]].copy(),
-        "disp": disp_df[["reg", "event_date", "disposal_reason", "__farm", "__subdivision"]].copy(),
+        "disp": disp_df[
+            ["reg", "event_date", "disposal_reason", "lact", "__farm", "__subdivision"]
+        ].copy(),
         "bulls": bulls_df[["bull_code", "bull_type"]].copy(),
     }
 

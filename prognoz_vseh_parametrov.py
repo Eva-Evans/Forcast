@@ -252,8 +252,10 @@ def normalize_events_df(df: pd.DataFrame) -> pd.DataFrame:
         so = df["Событие"].astype(str).str.strip().str.upper()
         df.loc[raw.str.contains("SOLD", na=False), "Событие"] = "ПРОДАНА"
         df.loc[raw.str.contains("BRED", na=False), "Событие"] = "ОСЕМЕН"
+        df.loc[raw.str.contains("DIED", na=False), "Событие"] = "ПАЛА"
         df.loc[so.str.contains("SOLD", na=False), "Событие"] = "ПРОДАНА"
         df.loc[so.str.contains("BRED", na=False), "Событие"] = "ОСЕМЕН"
+        df.loc[so.str.contains("DIED", na=False), "Событие"] = "ПАЛА"
     if "Куда" not in df.columns and "REM" in df.columns:
         df["Куда"] = df["REM"].astype(str).str.strip()
     elif "Куда" in df.columns:
@@ -670,6 +672,12 @@ _CALVING_EVENT_ISIN_EVENTS = (
 )
 
 
+_CALVING_COW_EVENT_ISIN = (
+    "df_events_train['Событие'].astype(str).str.upper().str.strip().str.replace('NAN', '', regex=False)"
+    ".isin(('ОТЕЛ', 'ОТЁЛ', 'CALVING', 'CALVED', 'ОТЕЛЕНИЕ'))"
+)
+
+
 def _patch_calving_event_types(src: str) -> str:
     """Finál cells 1/3/7/10: распознавание отёлов из Калуги (CALVING, РОЖД, …)."""
     old_otel = (
@@ -685,14 +693,85 @@ def _patch_calving_event_types(src: str) -> str:
         "df_calving_cows_train = df_events_train[(df_events_train['Событие'] == 'ОТЕЛ') &\n"
         "                                        (df_events_train['LACT'] >= 2)].copy()",
         "df_calving_cows_train = df_events_train["
-        f"({_CALVING_EVENT_ISIN_EVENTS}) & "
-        "(pd.to_numeric(df_events_train['LACT'], errors='coerce') >= 2)].copy()",
+        f"({_CALVING_COW_EVENT_ISIN}) & "
+        "(pd.to_numeric(df_events_train['LACT'], errors='coerce') >= 1)].copy()",
+    )
+    src = src.replace(
+        "print(f\"  Отелов коров (LACT>=2) в обучении: {len(df_calving_cows_train)}\")",
+        "print(f\"  Отелов коров (LACT>=1) в обучении: {len(df_calving_cows_train)}\")",
     )
     src = src.replace(
         "df_dry_train = df_events_train[df_events_train['тип_файла'] == 'ЗАПУСК'].copy()",
         "df_dry_train = df_events_train["
-        "df_events_train['Событие'].astype(str).str.upper().str.strip() == 'ЗАПУСК'].copy()",
+        "df_events_train['Событие'].astype(str).str.upper().str.strip() == 'DRY'].copy()",
     )
+    src = _patch_cell10_kaluga_dry_culling(src)
+    return src
+
+
+def _patch_cell10_kaluga_dry_culling(src: str) -> str:
+    """Калуга: выбытие сухостойных = prev DRY, last SOLD/DIED (Event/Событие)."""
+    old_fn = (
+        "def calculate_culling_suhostoynye_train(df_events):\n"
+        "    \"\"\"Определяет выбытия сухостойных по последнему событию\"\"\"\n"
+        "    df_sorted = df_events.sort_values(['ID', 'Дата'])\n\n"
+        "    culling_suh_list = []\n\n"
+        "    for cow_id in df_sorted['ID'].unique():\n"
+        "        cow_events = df_sorted[df_sorted['ID'] == cow_id].copy()\n\n"
+        "        if len(cow_events) == 0:\n"
+        "            continue\n\n"
+        "        last_event = cow_events.iloc[-1]\n\n"
+        "        if last_event['тип_файла'] == 'ВЫБЫТИЕ':\n"
+        "            if len(cow_events) >= 2:\n"
+        "                prev_event = cow_events.iloc[-2]\n"
+        "                if prev_event['тип_файла'] == 'ЗАПУСК':\n"
+        "                    culling_suh_list.append({\n"
+        "                        'ID': cow_id,\n"
+        "                        'дата_выбытия': last_event['Дата'],\n"
+        "                        'год': last_event['год'],\n"
+        "                        'месяц': last_event['месяц']\n"
+        "                    })\n\n"
+        "    df_culling_suh = pd.DataFrame(culling_suh_list)\n"
+        "    if len(df_culling_suh) > 0:\n"
+        "        culling_suh_monthly = df_culling_suh.groupby(['год', 'месяц']).size().reset_index(name='выбытия_сухостойных')\n"
+        "    else:\n"
+        "        culling_suh_monthly = pd.DataFrame(columns=['год', 'месяц', 'выбытия_сухостойных'])\n\n"
+        "    print(f\"  Выбытий сухостойных в обучении: {len(df_culling_suh)}\")\n"
+        "    return culling_suh_monthly"
+    )
+    new_fn = (
+        "def calculate_culling_suhostoynye_train(df_events):\n"
+        "    \"\"\"Калуга: предыдущее DRY, последнее SOLD/DIED (Event/Событие).\"\"\"\n"
+        "    df_sorted = df_events.sort_values(['ID', 'Дата'])\n"
+        "    culling_suh_list = []\n\n"
+        "    for cow_id in df_sorted['ID'].unique():\n"
+        "        cow_events = df_sorted[df_sorted['ID'] == cow_id].copy()\n"
+        "        if len(cow_events) < 2:\n"
+        "            continue\n"
+        "        last_event = cow_events.iloc[-1]\n"
+        "        prev_event = cow_events.iloc[-2]\n"
+        "        ev_last = str(last_event.get('Событие', '')).upper().strip()\n"
+        "        ev_prev = str(prev_event.get('Событие', '')).upper().strip()\n"
+        "        if ev_prev != 'DRY':\n"
+        "            continue\n"
+        "        if ev_last not in ('SOLD', 'DIED', 'ПРОДАНА', 'ПАЛА'):\n"
+            "            continue\n"
+        "        culling_suh_list.append({\n"
+        "            'ID': cow_id,\n"
+        "            'дата_выбытия': last_event['Дата'],\n"
+        "            'год': last_event['год'],\n"
+        "            'месяц': last_event['месяц'],\n"
+        "        })\n\n"
+        "    df_culling_suh = pd.DataFrame(culling_suh_list)\n"
+        "    if len(df_culling_suh) > 0:\n"
+        "        culling_suh_monthly = df_culling_suh.groupby(['год', 'месяц']).size().reset_index(name='выбытия_сухостойных')\n"
+        "    else:\n"
+        "        culling_suh_monthly = pd.DataFrame(columns=['год', 'месяц', 'выбытия_сухостойных'])\n\n"
+        "    print(f\"  Выбытий сухостойных в обучении: {len(df_culling_suh)}\")\n"
+        "    return culling_suh_monthly"
+    )
+    if old_fn in src:
+        src = src.replace(old_fn, new_fn, 1)
     return src
 
 
@@ -727,6 +806,57 @@ def _patch_gridsearch_min_samples(src: str) -> str:
     )
     if cell1_block in src:
         src = src.replace(cell1_block, cell1_new, 1)
+    src = _patch_gridsearch_cell18(src)
+    return src
+
+
+def _patch_gridsearch_cell18(src: str) -> str:
+    """Яч. 18: не падать на GridSearch при 0 обучающих месяцах."""
+    old = (
+        "    tscv = TimeSeriesSplit(n_splits=min(3, len(train_clean)-2))\n"
+        "    grid_search = GridSearchCV(\n"
+        "        XGBRegressor(random_state=42, verbosity=0),\n"
+        "        param_grid,\n"
+        "        cv=tscv,\n"
+        "        scoring='neg_mean_absolute_error',\n"
+        "        n_jobs=-1,\n"
+        "        verbose=0\n"
+        "    )\n"
+        "    grid_search.fit(X_train, y_train)\n\n"
+        "    print(f\"  Лучшие параметры: {grid_search.best_params_}\")\n"
+        "    print(f\"  Лучшая MAE: {abs(grid_search.best_score_):.2f}\")\n\n"
+        "    # Обучаем финальную модель\n"
+        "    final_model = XGBRegressor(**grid_search.best_params_, random_state=42)\n"
+        "    final_model.fit(X_train, y_train)\n\n"
+        "    return final_model, grid_search.best_params_"
+    )
+    new = (
+        "    _default_params = {'n_estimators': 100, 'max_depth': 4, 'learning_rate': 0.08, "
+        "'subsample': 0.8, 'colsample_bytree': 0.8}\n"
+        "    _n_cv = min(3, len(train_clean) - 2)\n"
+        "    if _n_cv >= 2 and len(train_clean) >= 3:\n"
+        "        tscv = TimeSeriesSplit(n_splits=_n_cv)\n"
+        "        grid_search = GridSearchCV(\n"
+        "            XGBRegressor(random_state=42, verbosity=0),\n"
+        "            param_grid,\n"
+        "            cv=tscv,\n"
+        "            scoring='neg_mean_absolute_error',\n"
+        "            n_jobs=-1,\n"
+        "            verbose=0\n"
+        "        )\n"
+        "        grid_search.fit(X_train, y_train)\n"
+        "        best_params = grid_search.best_params_\n"
+        "        print(f\"  Лучшие параметры: {best_params}\")\n"
+        "        print(f\"  Лучшая MAE: {abs(grid_search.best_score_):.2f}\")\n"
+        "    else:\n"
+        "        best_params = _default_params\n"
+        "        print(f\"  Мало обучающих месяцев ({len(train_clean)}), параметры по умолчанию\")\n\n"
+        "    final_model = XGBRegressor(**best_params, random_state=42)\n"
+        "    final_model.fit(X_train, y_train)\n\n"
+        "    return final_model, best_params"
+    )
+    if old in src:
+        src = src.replace(old, new, 1)
     return src
 
 
@@ -1009,6 +1139,7 @@ def _patch_cell25_trade_and_features(src: str) -> str:
     src = src.replace(
         "    dry = df_raw[df_raw['Событие'].str.strip() == 'ЗАПУСК']\n",
         "    dry = df_raw[_ev.isin(('ЗАПУСК', 'DRY'))]\n",
+        "    dry = df_raw[_ev == 'DRY']\n",
     )
     src = src.replace(
         "    exits = df_raw[df_raw['Событие'].str.strip().isin(['ВЫБЫТИЕ', 'ПРОДАНА'])]\n",
@@ -2002,9 +2133,10 @@ def _patch_cell20_lact_anchor_baseline(
     baseline: dict[str, float] | None,
     train_end: pd.Timestamp,
 ) -> str:
-    """L1–L5+ на конец месяца train_end (не дефолты finál / сен 2024)."""
+    """L1–L5+ на конец месяца train_end; seed forecasts + fallback при sum=0."""
     need = ("L1", "L2", "L3", "L4", "L5+")
     if not baseline or any(baseline.get(k) is None for k in need):
+        src = _patch_cell20_zero_fallback(src)
         return src
     vals = {k: int(round(float(baseline[k]))) for k in need}
     old = (
@@ -2031,18 +2163,48 @@ def _patch_cell20_lact_anchor_baseline(
         f"    'L5+': {vals['L5+']},\n"
         "}\n"
         f'print("  (L1–L5+ из базы поголовья на {ay}-{am:02d})")\n'
+        f"_anchor_y, _anchor_m = {ay}, {am}\n"
+        "for _lk, _lv in prev_values.items():\n"
+        "    forecasts[_lk][(_anchor_y, _anchor_m)] = int(_lv)\n"
     )
     if old in src:
-        return src.replace(old, new, 1)
-    # fallback: replace only defaults dict if structure drifted
-    return src.replace(
-        "prev_values = {'L1': 633, 'L2': 834, 'L3': 527, 'L4': 334, 'L5+': 266}",
-        "prev_values = {"
-        f"'L1': {vals['L1']}, 'L2': {vals['L2']}, 'L3': {vals['L3']}, "
-        f"'L4': {vals['L4']}, 'L5+': {vals['L5+']}"
-        "}",
-        1,
+        src = src.replace(old, new, 1)
+    else:
+        src = src.replace(
+            "prev_values = {'L1': 633, 'L2': 834, 'L3': 527, 'L4': 334, 'L5+': 266}",
+            "prev_values = {"
+            f"'L1': {vals['L1']}, 'L2': {vals['L2']}, 'L3': {vals['L3']}, "
+            f"'L4': {vals['L4']}, 'L5+': {vals['L5+']}"
+            "}",
+            1,
+        )
+    src = _patch_cell20_zero_fallback(src)
+    return src
+
+
+def _patch_cell20_zero_fallback(src: str) -> str:
+    """Если ML дал 0 по всем L*, распределить фураж по долям prev_values."""
+    old = (
+        "    # ====== КОРРЕКТИРОВКА: сумма = фуражные ======\n"
+        "    total_pred = sum(pred_values_raw.values())\n\n"
+        "    if total_pred > 0 and total_pred != furazh:"
     )
+    new = (
+        "    # ====== КОРРЕКТИРОВКА: сумма = фуражные ======\n"
+        "    total_pred = sum(pred_values_raw.values())\n\n"
+        "    if total_pred == 0 and furazh > 0:\n"
+        "        _base = sum(prev_values.values())\n"
+        "        if _base > 0:\n"
+        "            for target in lact_cols:\n"
+        "                pred_values_raw[target] = max(\n"
+        "                    0, int(round(furazh * prev_values[target] / _base))\n"
+        "                )\n"
+        "            total_pred = sum(pred_values_raw.values())\n\n"
+        "    if total_pred > 0 and total_pred != furazh:"
+    )
+    if old in src:
+        src = src.replace(old, new, 1)
+    return src
 
 
 def build_injections(state: dict[str, Any]) -> dict[str, Any]:
@@ -2503,9 +2665,9 @@ def run_pipeline(cfg: PipelineConfig) -> tuple[pd.DataFrame, pd.DataFrame]:
             (3, after_cell_3),
             (5, after_cell_5),
             (7, after_cell_7),
-            (10, after_cell_10),
             (14, after_cell_14),
             (12, after_cell_12),
+            (10, after_cell_10),
             (16, after_cell_16),
             (18, after_cell_18),
             (20, after_cell_20),
@@ -2937,9 +3099,9 @@ def build_kaluga_filter_folder(
         f"{', +полный split для факта' if full_dir else ''})"
     )
 
-    dry_ev = disp_all[disp_all["Event"].astype(str).str.upper().str.strip().isin(["DRY", "ЗАПУСК", "ЗАПУСКА"])]
+    dry_ev = disp_all[disp_all["Event"].astype(str).str.upper().str.strip() == "DRY"]
     cull = disp_all[
-        ~disp_all["Event"].astype(str).str.upper().str.strip().isin(["DRY", "ЗАПУСК", "ЗАПУСКА"])
+        disp_all["Event"].astype(str).str.upper().str.strip() != "DRY"
     ]
 
     datasets = (

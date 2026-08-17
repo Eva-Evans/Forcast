@@ -200,7 +200,8 @@ def _ensure_farm_tables() -> None:
             birth_date DATE,
             sex TEXT,
             event_type TEXT,
-            event_date DATE
+            event_date DATE,
+            lact INTEGER
         );
         """,
         f"""
@@ -228,7 +229,8 @@ def _ensure_farm_tables() -> None:
             farm_name TEXT NOT NULL,
             reg TEXT,
             event_date DATE,
-            disposal_reason TEXT
+            disposal_reason TEXT,
+            lact INTEGER
         );
         """,
         f"""
@@ -249,6 +251,8 @@ def _ensure_farm_tables() -> None:
         for stmt in ddl:
             conn.execute(text(stmt))
         conn.execute(text(f"ALTER TABLE {TAB3_TABLES['dry']} ADD COLUMN IF NOT EXISTS move_reason TEXT"))
+        conn.execute(text(f"ALTER TABLE {TAB3_TABLES['calv']} ADD COLUMN IF NOT EXISTS lact INTEGER"))
+        conn.execute(text(f"ALTER TABLE {TAB3_TABLES['disp']} ADD COLUMN IF NOT EXISTS lact INTEGER"))
 
 def _ensure_forecast_cache_table() -> None:
     ddl = f"""
@@ -599,10 +603,10 @@ def _deduplicate_subdivision_rows(subdivision_name: str) -> None:
         return
 
     specs: list[tuple[str, list[str]]] = [
-        (TAB3_TABLES["calv"], ["reg", "mother_reg", "birth_date", "sex", "event_type", "event_date"]),
+        (TAB3_TABLES["calv"], ["reg", "mother_reg", "birth_date", "sex", "event_type", "event_date", "lact"]),
         (TAB3_TABLES["ins"], ["reg", "lact", "dim_age", "event_date", "bull", "result"]),
         (TAB3_TABLES["dry"], ["reg", "dim", "event_date", "move_reason"]),
-        (TAB3_TABLES["disp"], ["reg", "event_date", "disposal_reason"]),
+        (TAB3_TABLES["disp"], ["reg", "event_date", "disposal_reason", "lact"]),
         (TAB3_TABLES["bulls"], ["bull_code", "bull_type"]),
     ]
 
@@ -640,10 +644,10 @@ def _save_farm_tables_to_db(farm_name: str, tables: dict[str, pd.DataFrame], rep
                 conn.execute(text(f"DELETE FROM {t} WHERE farm_name = :farm"), {"farm": farm})
 
     mapping = {
-        "calv": ["reg", "mother_reg", "birth_date", "sex", "event_type", "event_date"],
+        "calv": ["reg", "mother_reg", "birth_date", "sex", "event_type", "event_date", "lact"],
         "ins": ["reg", "lact", "dim_age", "event_date", "bull", "result"],
         "dry": ["reg", "dim", "event_date", "move_reason"],
-        "disp": ["reg", "event_date", "disposal_reason"],
+        "disp": ["reg", "event_date", "disposal_reason", "lact"],
         "bulls": ["bull_code", "bull_type"],
     }
 
@@ -966,7 +970,7 @@ def _load_farm_tables_from_db(farm_name: str) -> dict[str, pd.DataFrame]:
     calv = pd.read_sql(
         text(
             f"""
-            SELECT reg, mother_reg, birth_date, sex, event_type, event_date
+            SELECT reg, mother_reg, birth_date, sex, event_type, event_date, lact
             FROM {TAB3_TABLES['calv']}
             WHERE farm_name = :farm
             """
@@ -999,7 +1003,7 @@ def _load_farm_tables_from_db(farm_name: str) -> dict[str, pd.DataFrame]:
     disp = pd.read_sql(
         text(
             f"""
-            SELECT reg, event_date, disposal_reason
+            SELECT reg, event_date, disposal_reason, lact
             FROM {TAB3_TABLES['disp']}
             WHERE farm_name = :farm
             """

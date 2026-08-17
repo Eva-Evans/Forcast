@@ -119,14 +119,18 @@ def _tab3_inseminations_to_source(df: pd.DataFrame) -> pd.DataFrame:
 def _tab3_dry_disp_to_source(dry: pd.DataFrame, disp: pd.DataFrame) -> pd.DataFrame:
     parts: list[pd.DataFrame] = []
     for df, default_ev in (
-        (dry, "ЗАПУСК"),
+        (dry, "DRY"),
         (disp, "ВЫБЫТИЕ"),
     ):
         if not isinstance(df, pd.DataFrame) or df.empty:
             continue
         reg = df.get("reg", pd.Series(dtype=object)).astype(str)
-        reason = df.get("disposal_reason", pd.Series(dtype=object)).astype(str)
-        ev = reason.where(reason.str.strip() != "", default_ev)
+        if default_ev == "DRY":
+            reason = df.get("move_reason", pd.Series(dtype=object)).astype(str)
+        else:
+            reason = df.get("disposal_reason", pd.Series(dtype=object)).astype(str)
+        ev = reason.where(reason.str.strip().ne("") & reason.str.lower().ne("nan"), default_ev)
+        lact = pd.to_numeric(df.get("lact"), errors="coerce")
         block = pd.DataFrame(
             {
                 "ID": reg,
@@ -137,6 +141,8 @@ def _tab3_dry_disp_to_source(dry: pd.DataFrame, disp: pd.DataFrame) -> pd.DataFr
                 "Событие": ev,
                 "REM": reason,
                 "Куда": reason,
+                "LACT": lact,
+                "Lact": lact,
             }
         )
         block["тип_файла"] = "ЗАПУСК+ВЫБЫТИЕ"
