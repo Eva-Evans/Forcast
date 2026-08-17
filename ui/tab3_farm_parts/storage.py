@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+import time
 from datetime import date
 from typing import Any
 
 import pandas as pd
 import streamlit as st
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 
 from db import engine
 from .common import *
@@ -190,7 +193,23 @@ def _seed_builtin_capacity_rows() -> int:
         _clear_forecast_cache(entity_type="farm", entity_name=farm)
     return changed
 
+_TAB3_FARM_SCHEMA_READY = False
+_TAB3_FARM_SCHEMA_GUARD = threading.Lock()
+_TAB3_FARM_SCHEMA_ADVISORY_KEY = 0x7A3B0001
+
+
 def _ensure_farm_tables() -> None:
+    global _TAB3_FARM_SCHEMA_READY
+    if _TAB3_FARM_SCHEMA_READY:
+        return
+    with _TAB3_FARM_SCHEMA_GUARD:
+        if _TAB3_FARM_SCHEMA_READY:
+            return
+        _migrate_farm_tables_with_retry()
+        _TAB3_FARM_SCHEMA_READY = True
+
+
+def _migrate_farm_tables_with_retry(max_attempts: int = 5) -> None:
     ddl = [
         f"""
         CREATE TABLE IF NOT EXISTS {TAB3_TABLES['calv']} (
@@ -246,13 +265,35 @@ def _ensure_farm_tables() -> None:
         f"CREATE INDEX IF NOT EXISTS idx_{TAB3_TABLES['disp']}_farm ON {TAB3_TABLES['disp']}(farm_name);",
         f"CREATE INDEX IF NOT EXISTS idx_{TAB3_TABLES['bulls']}_farm ON {TAB3_TABLES['bulls']}(farm_name);",
     ]
+    alter_stmts = (
+        f"ALTER TABLE {TAB3_TABLES['dry']} ADD COLUMN IF NOT EXISTS move_reason TEXT",
+        f"ALTER TABLE {TAB3_TABLES['calv']} ADD COLUMN IF NOT EXISTS lact INTEGER",
+        f"ALTER TABLE {TAB3_TABLES['disp']} ADD COLUMN IF NOT EXISTS lact INTEGER",
+    )
 
-    with engine.begin() as conn:
-        for stmt in ddl:
-            conn.execute(text(stmt))
-        conn.execute(text(f"ALTER TABLE {TAB3_TABLES['dry']} ADD COLUMN IF NOT EXISTS move_reason TEXT"))
-        conn.execute(text(f"ALTER TABLE {TAB3_TABLES['calv']} ADD COLUMN IF NOT EXISTS lact INTEGER"))
-        conn.execute(text(f"ALTER TABLE {TAB3_TABLES['disp']} ADD COLUMN IF NOT EXISTS lact INTEGER"))
+    last_err: Exception | None = None
+    for attempt in range(max_attempts):
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    text("SELECT pg_advisory_xact_lock(:lock_key)"),
+                    {"lock_key": _TAB3_FARM_SCHEMA_ADVISORY_KEY},
+                )
+                for stmt in ddl:
+                    conn.execute(text(stmt))
+                for stmt in alter_stmts:
+                    conn.execute(text(stmt))
+            return
+        except OperationalError as exc:
+            last_err = exc
+            err = str(exc).lower()
+            if "deadlock" not in err and "lock" not in err:
+                raise
+            if attempt + 1 >= max_attempts:
+                break
+            time.sleep(0.15 * (2**attempt))
+    if last_err is not None:
+        raise last_err
 
 def _ensure_forecast_cache_table() -> None:
     ddl = f"""
