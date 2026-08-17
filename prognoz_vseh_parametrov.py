@@ -855,6 +855,44 @@ def _patch_gridsearch_cell18(src: str) -> str:
         "    final_model.fit(X_train, y_train)\n\n"
         "    return final_model, best_params"
     )
+    variants = [old, old.replace("n_jobs=-1", "n_jobs=1")]
+    new_v = new.replace("n_jobs=-1", "n_jobs=1")
+    for old_v in variants:
+        if old_v in src:
+            src = src.replace(old_v, new_v, 1)
+            break
+    return src
+
+
+def _patch_cell18_empty_train(src: str) -> str:
+    """Яч. 18: при 0 месяцах обучения — нулевой прогноз, без GridSearch."""
+    old = (
+        "def train_model_for_target(train_df, target_col, feature_cols):\n"
+        "    \"\"\"Обучает модель для указанной целевой переменной\"\"\"\n"
+        "    # Удаляем строки с NaN\n"
+        "    train_clean = train_df.dropna()\n\n"
+        "    X_train = train_clean[feature_cols]\n"
+        "    y_train = train_clean[target_col]\n\n"
+        "    print(f\"\\n  Обучение для {target_col}: {len(train_clean)} месяцев, признаков: {len(feature_cols)}\")\n\n"
+        "    # Grid search\n"
+    )
+    new = (
+        "def train_model_for_target(train_df, target_col, feature_cols):\n"
+        "    \"\"\"Обучает модель для указанной целевой переменной\"\"\"\n"
+        "    # Удаляем строки с NaN\n"
+        "    train_clean = train_df.dropna()\n\n"
+        "    print(f\"\\n  Обучение для {target_col}: {len(train_clean)} месяцев, признаков: {len(feature_cols)}\")\n\n"
+        "    if len(train_clean) == 0:\n"
+        "        print(\"  Нет обучающих данных — прогноз нулевой\")\n"
+        "        class _ZeroDeathModel:\n"
+        "            def predict(self, X):\n"
+        "                import numpy as np\n"
+        "                return np.zeros(len(X))\n"
+        "        return _ZeroDeathModel(), {}\n\n"
+        "    X_train = train_clean[feature_cols]\n"
+        "    y_train = train_clean[target_col]\n\n"
+        "    # Grid search\n"
+    )
     if old in src:
         src = src.replace(old, new, 1)
     return src
@@ -1075,30 +1113,6 @@ def _patch_cell25_trade_and_features(src: str) -> str:
     if old_loop in src:
         src = src.replace(old_loop, new_loop)
     src = src.replace(
-        "                if lact == 0 and any(v in _bull_dest for v in _BULL_SALE_KUDA):\n"
-        "                    age = get_age_group_bulls(bdat, event_date)\n"
-        "                    if age == '0-6':\n"
-        "                        row['продажа_бычки_0-6_внутри'] += 1\n"
-        "                    continue",
-        "                if lact == 0 and any(v in _bull_dest for v in _BULL_SALE_KUDA):\n"
-        "                    age = get_age_group_bulls(bdat, event_date)\n"
-        "                    if age in ('0-2', '2-6', '0-6'):\n"
-        "                        row['продажа_бычки_0-6_внутри'] += 1\n"
-        "                    continue",
-    )
-    src = src.replace(
-        "                if lact == 0 and any(v in kuda for v in _BULL_SALE_KUDA):\n"
-        "                    age = get_age_group_bulls(bdat, event_date)\n"
-        "                    if age == '0-6':\n"
-        "                        row['продажа_бычки_0-6_внутри'] += 1\n"
-        "                    continue",
-        "                if lact == 0 and any(v in _bull_dest for v in _BULL_SALE_KUDA):\n"
-        "                    age = get_age_group_bulls(bdat, event_date)\n"
-        "                    if age in ('0-2', '2-6', '0-6'):\n"
-        "                        row['продажа_бычки_0-6_внутри'] += 1\n"
-        "                    continue",
-    )
-    src = src.replace(
         "                # Продажа телок\n"
         "                if lact == 0 and any(v in kuda for v in [x.upper() for x in kuda_heifers]):\n"
         "                    age = get_age_group_exact(bdat, event_date)\n"
@@ -1161,8 +1175,10 @@ def _patch_cell25_bull_sales_full(src: str) -> str:
         "продажа_бычки_12-18_внутри",
         "продажа_бычки_18+_внутри",
     ]
-    bull_target_lines = "\n".join(f"        '{c}'," for c in bull_cols)
-    src = src.replace("        'продажа_бычки_0-6_внутри',", bull_target_lines)
+    bull_target_lines_8 = "\n".join(f"        '{c}'," for c in bull_cols)
+    bull_target_lines_4 = "\n".join(f"    '{c}'," for c in bull_cols)
+    src = src.replace("        'продажа_бычки_0-6_внутри',", bull_target_lines_8)
+    src = src.replace("    'продажа_бычки_0-6_внутри',", bull_target_lines_4)
     src = src.replace(
         "            row['продажа_бычки_0-6_внутри'] = 0\n",
         "            for age in ['0-2', '2-6', '6-12', '12-18', '18+']:\n"
@@ -1482,7 +1498,6 @@ def patch_cell_source(src: str, cfg: PipelineConfig) -> str:
         )
         src = src.replace("verbose=1", "verbose=0")
         src = _patch_skip_gridsearch_when_fast(src)
-    src = src.replace("n_jobs=-1", "n_jobs=1")
     src = _patch_bulls_remark_and_type(src)
     src = _patch_semen_remark_in_folder_files(src)
     src = _patch_birth_event_rozhd(src)
@@ -1490,6 +1505,8 @@ def patch_cell_source(src: str, cfg: PipelineConfig) -> str:
     src = _patch_split_calvings_lact(src)
     src = _patch_predict_months_loops(src)
     src = _patch_gridsearch_min_samples(src)
+    src = _patch_cell18_empty_train(src)
+    src = src.replace("n_jobs=-1", "n_jobs=1")
     src = _apply_trade_patches(src, cfg)
     src = _patch_cell23_vectorize(src)
     src = _patch_cell25_vectorize(src)
@@ -1850,6 +1867,12 @@ def _patch_lact_and_death_events(src: str) -> str:
         "death_mask = df['Событие'].str.upper().str.strip() == 'ПАЛА'",
         "death_mask = df['Событие'].astype(str).str.upper().str.strip().isin("
         "['ПАЛА', 'DIED', 'ПАЛ', 'DEAD', 'MORT', 'ПАДЕЖ'])",
+    )
+    src = src.replace(
+        "        df = df[df['Lact'] == 0].copy()\n"
+        "        print(f\"   Павших с Lact=0: {len(df)}\")",
+        "        df = df[pd.to_numeric(df['Lact'], errors='coerce').fillna(0).astype(int) == 0].copy()\n"
+        "        print(f\"   Павших с Lact=0: {len(df)}\")",
     )
     src = src.replace(
         "        return pd.DataFrame(columns=['год', 'месяц', 'дата_месяц', 'падеж_телочки', 'падеж_бычки'])",

@@ -1,23 +1,47 @@
 from __future__ import annotations
 
 import io
+import re
 import traceback
 from datetime import date
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import streamlit as st
 
-from config import FORECAST_HORIZON_MONTHS, USE_FINAL_PIPELINE
+from config import FORECAST_HORIZON_MONTHS, PIPELINE_WORK_ROOT, USE_FINAL_PIPELINE
 from core.forecast_params import MANUAL_BASELINE_FIELDS, manual_baseline_from_inputs
 from core.final_forecast_service import run_final_forecast_for_subdivision
 from core.subdivisions_registry import all_known_units_flat, display_label
 from forecast_dynamic import latest_data_date
+from prognoz_vseh_parametrov import ROOT
 from ui.tab3_farm_parts.storage import (
     _farm_name_for_subdivision,
     _load_farm_tables_from_db,
     _subdivision_status_df_from_db,
 )
+
+
+def _pipeline_forecast_xlsx(unit: str) -> Path:
+    safe = re.sub(r"[^\w\-]+", "_", unit)[:80]
+    root = Path(PIPELINE_WORK_ROOT)
+    if not root.is_absolute():
+        root = (ROOT / root).resolve()
+    return root / safe / "forecast_all.xlsx"
+
+
+def _try_load_saved_forecast(unit: str) -> tuple[pd.DataFrame, pd.DataFrame] | None:
+    path = _pipeline_forecast_xlsx(unit)
+    if not path.is_file():
+        return None
+    try:
+        xl = pd.ExcelFile(path)
+        forecast = pd.read_excel(xl, sheet_name="прогноз")
+        fact = pd.read_excel(xl, sheet_name="факт") if "факт" in xl.sheet_names else pd.DataFrame()
+        return forecast, fact
+    except Exception:
+        return None
 
 
 def _subdivision_options() -> list[dict[str, str]]:
@@ -172,6 +196,10 @@ def render_tab1_forecast() -> None:
 
     run = st.button("Рассчитать прогноз", type="primary", key="tab1_final_run", use_container_width=True)
 
+    forecast_table: pd.DataFrame | None = None
+    fact_table: pd.DataFrame | None = None
+    meta: dict[str, Any] = {}
+
     if run:
         if not chosen["ready"]:
             st.error(f"Подразделение «{unit}» не готово — загрузите полный комплект файлов.")
@@ -204,17 +232,31 @@ def render_tab1_forecast() -> None:
         st.session_state["tab1_final_forecast"] = forecast_table
         st.session_state["tab1_final_fact"] = fact_table
         st.session_state["tab1_final_meta"] = meta
+        st.session_state["tab1_final_unit"] = unit
         st.success(
             f"Готово: {meta.get('farm')} / {meta.get('unit')}, "
             f"обучение до {meta.get('train_end')}, месяцы: {', '.join(meta.get('month_cols', [])[:3])}…"
         )
-        st.rerun()
+    elif st.session_state.get("tab1_final_unit") == unit:
+        forecast_table = st.session_state.get("tab1_final_forecast")
+        fact_table = st.session_state.get("tab1_final_fact")
+        meta = st.session_state.get("tab1_final_meta") or {}
 
-    forecast_table = st.session_state.get("tab1_final_forecast")
-    fact_table = st.session_state.get("tab1_final_fact")
+    if (forecast_table is None or not isinstance(forecast_table, pd.DataFrame) or forecast_table.empty) and chosen["ready"]:
+        loaded = _try_load_saved_forecast(unit)
+        if loaded is not None:
+            forecast_table, fact_table = loaded
+            xlsx_path = _pipeline_forecast_xlsx(unit)
+            st.info(
+                f"Показан последний сохранённый прогноз с сервера (`{xlsx_path.name}`). "
+                "Если расчёт шёл долго и страница перезагрузилась — таблица всё равно доступна здесь и для скачивания."
+            )
+            meta = meta or {"output_xlsx": str(xlsx_path)}
 
     if isinstance(forecast_table, pd.DataFrame) and not forecast_table.empty:
         st.subheader("Прогноз (строки — параметры, столбцы — месяцы)")
+        if meta.get("output_xlsx"):
+            st.caption(f"Файл на сервере: `{meta['output_xlsx']}`")
         st.dataframe(_wide_to_display(forecast_table), use_container_width=True)
 
         buf = io.BytesIO()

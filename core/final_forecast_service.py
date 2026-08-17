@@ -166,5 +166,6 @@ def run_final_forecast_for_subdivision(
         "forecast_only": forecast_only,
         "anchor_date": anchor_me.isoformat(),
         "manual_baseline": manual_baseline,
+        "output_xlsx": str(cfg.output_xlsx),
     }
     return forecast_table, fact_table, meta
