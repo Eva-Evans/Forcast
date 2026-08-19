@@ -609,16 +609,10 @@ def _patch_bulls_remark_and_type(src: str) -> str:
 
 
 def _patch_birth_event_rozhd(src: str) -> str:
-    """Калуга/DZ: рождения = РОЖД/ОТЕЛ (не только РОЖДЕН)."""
+    """Калуга/DZ: рождения = только РОЖД/РОЖДЕН (приплод), не отёлы коров."""
     birth_isin = (
         "df['Событие'].astype(str).str.upper().str.strip().str.replace('NAN', '', regex=False)"
-        ".isin(('РОЖД', 'РОЖДЕН', 'CALF', 'CALVED', 'РОЖДЕНИЕ', "
-        "'ОТЕЛ', 'ОТЁЛ', 'CALVING', 'ОТЕЛЕНИЕ'))"
-    )
-    calv_isin = (
-        "df['Событие'].astype(str).str.upper().str.strip().str.replace('NAN', '', regex=False)"
-        ".isin(('ОТЕЛ', 'ОТЁЛ', 'CALVING', 'CALVED', 'ОТЕЛЕНИЕ', "
-        "'РОЖД', 'РОЖДЕН', 'CALF', 'РОЖДЕНИЕ'))"
+        ".isin(('РОЖД', 'РОЖД.', 'РОЖДЕН', 'РОЖДЕНИЕ', 'BORN', 'BIRTH', 'CALF'))"
     )
     birth_block_old = (
         "    # Только события \"Рожден\"\n"
@@ -626,24 +620,41 @@ def _patch_birth_event_rozhd(src: str) -> str:
         "    df = df[birth_mask].copy()"
     )
     birth_block_new = (
-        "    # Рождения: РОЖД/РОЖДЕН или отёлы (Калуга — Отелы_YYYY)\n"
+        "    # Рождения: только РОЖД/РОЖДЕН (приплод). ОТЕЛ — отёлы коров, не приплод.\n"
         f"    birth_mask = {birth_isin}\n"
         "    if not birth_mask.any() and len(df) > 0:\n"
-        f"        birth_mask = {calv_isin}\n"
+        "        _ev = df['Событие'].astype(str).str.upper().str.strip().str.replace('NAN', '', regex=False)\n"
+        "        _lact0 = pd.to_numeric(df.get('LACT', df.get('Lact', 0)), errors='coerce').fillna(0).astype(int) == 0\n"
+        "        _gndr = df.get('GNDR', pd.Series('', index=df.index)).astype(str).str.upper().str.strip().isin(['F', 'M'])\n"
+        "        birth_mask = _ev.isin(('ОТЕЛ', 'ОТЁЛ', 'CALVING', 'CALVED', 'ОТЕЛЕНИЕ')) & _lact0 & _gndr\n"
         "    df = df[birth_mask].copy()"
     )
     if birth_block_old in src:
         src = src.replace(birth_block_old, birth_block_new)
     else:
-        src = src.replace(
-            "birth_mask = df['Событие'].str.upper().str.strip() == 'РОЖДЕН'",
-            f"birth_mask = {birth_isin}",
+        birth_block_old_patched = (
+            "    # Рождения: РОЖД/РОЖДЕН или отёлы (Калуга — Отелы_YYYY)\n"
+            "    birth_mask = df['Событие'].astype(str).str.upper().str.strip().str.replace('NAN', '', regex=False)"
+            ".isin(('РОЖД', 'РОЖДЕН', 'CALF', 'CALVED', 'РОЖДЕНИЕ', "
+            "'ОТЕЛ', 'ОТЁЛ', 'CALVING', 'ОТЕЛЕНИЕ'))\n"
+            "    if not birth_mask.any() and len(df) > 0:\n"
+            "        birth_mask = df['Событие'].astype(str).str.upper().str.strip().str.replace('NAN', '', regex=False)"
+            ".isin(('ОТЕЛ', 'ОТЁЛ', 'CALVING', 'CALVED', 'ОТЕЛЕНИЕ', "
+            "'РОЖД', 'РОЖДЕН', 'CALF', 'РОЖДЕНИЕ'))\n"
+            "    df = df[birth_mask].copy()"
         )
+        if birth_block_old_patched in src:
+            src = src.replace(birth_block_old_patched, birth_block_new)
+        else:
+            src = src.replace(
+                "birth_mask = df['Событие'].str.upper().str.strip() == 'РОЖДЕН'",
+                f"birth_mask = {birth_isin}",
+            )
     src = src.replace(
         "all_calvings = all_calvings[all_calvings['Событие'].str.upper().str.strip() == 'РОЖДЕН']",
-        "all_calvings = all_calvings[all_calvings['Событие'].astype(str).str.upper().str.strip()"
-        ".isin(('РОЖД', 'РОЖДЕН', 'CALF', 'CALVED', 'РОЖДЕНИЕ', "
-        "'ОТЕЛ', 'ОТЁЛ', 'CALVING', 'ОТЕЛЕНИЕ'))]",
+        "all_calvings = all_calvings["
+        "all_calvings['Событие'].astype(str).str.upper().str.strip()"
+        ".isin(('РОЖД', 'РОЖД.', 'РОЖДЕН', 'РОЖДЕНИЕ', 'BORN', 'BIRTH', 'CALF'))]",
     )
     src = src.replace(
         "print(f\"  Телочки: {train_df['телочки'].sum()} ({train_df['телочки'].sum()/train_df['отелы'].sum()*100:.1f}%)\")\n"
@@ -656,6 +667,29 @@ def _patch_birth_event_rozhd(src: str) -> str:
         "    print(\"  Телочки: 0 (нет данных)\")\n"
         "    print(\"  Бычки: 0 (нет данных)\")",
     )
+    gndr_old = (
+        "    # Определяем пол по GNDR (F = телочка, M = бычок)\n"
+        "    if 'GNDR' in df.columns:\n"
+        "        df['телочка'] = df['GNDR'].str.upper().str.strip().apply(lambda x: 1 if x == 'F' else 0)\n"
+        "        df['бычок'] = df['GNDR'].str.upper().str.strip().apply(lambda x: 1 if x == 'M' else 0)\n"
+        "    else:\n"
+        "        print(\"  ВНИМАНИЕ: Нет колонки GNDR, использую 50/50\")\n"
+        "        df['телочка'] = 0.5\n"
+        "        df['бычок'] = 0.5"
+    )
+    gndr_new = (
+        "    # Определяем пол по GNDR / Пол (F = телочка, M = бычок)\n"
+        "    _sex = df.get('GNDR', df.get('Пол', df.get('SEX', pd.Series('', index=df.index))))\n"
+        "    _sex = _sex.astype(str).str.upper().str.strip()\n"
+        "    df['телочка'] = _sex.isin(['F', 'FEMALE', 'Т', 'ТELKA', 'HEIFER']).astype(int)\n"
+        "    df['бычок'] = _sex.isin(['M', 'MALE', 'Б', 'BULL']).astype(int)\n"
+        "    _unk = (df['телочка'] + df['бычок']) == 0\n"
+        "    if _unk.any():\n"
+        "        df.loc[_unk, 'телочка'] = 0.5\n"
+        "        df.loc[_unk, 'бычок'] = 0.5"
+    )
+    if gndr_old in src:
+        src = src.replace(gndr_old, gndr_new)
     return src
 
 
@@ -949,7 +983,34 @@ def _patch_cell5_predict_horizon(src: str) -> str:
     return src
 
 
-def _patch_cell18_predict_horizon(src: str) -> str:
+def _patch_cell5_cap_births_to_calvings(src: str) -> str:
+    """Яч. 5: телочки+бычки = прогноз отёлов; не больше total_forecast."""
+    old = (
+        "    pred_heifers = final_model.predict(X_pred)[0]\n"
+        "    pred_heifers = max(0, int(round(pred_heifers)))\n"
+        "    pred_bulls = max(0, total_forecast - pred_heifers)"
+    )
+    new = (
+        "    pred_heifers = final_model.predict(X_pred)[0]\n"
+        "    pred_heifers = max(0, int(round(pred_heifers)))\n"
+        "    _calv_total = max(0, int(round(total_forecast)))\n"
+        "    if _calv_total > 0:\n"
+        "        pred_heifers = min(pred_heifers, _calv_total)\n"
+        "        pred_bulls = _calv_total - pred_heifers\n"
+        "        if pred_bulls == 0 and _calv_total > 1:\n"
+        "            _birth_n = train_df['отелы'].sum()\n"
+        "            _h_share = (train_df['телочки'].sum() / _birth_n) if _birth_n else 0.5\n"
+        "            _h_share = min(max(_h_share, 0.35), 0.65)\n"
+        "            pred_heifers = int(round(_calv_total * _h_share))\n"
+        "            pred_bulls = _calv_total - pred_heifers\n"
+        "    else:\n"
+        "        _birth_n = train_df['отелы'].sum()\n"
+        "        _h_share = (train_df['телочки'].sum() / _birth_n) if _birth_n else 0.5\n"
+        "        pred_bulls = max(0, int(round(pred_heifers * (1 - _h_share) / max(_h_share, 1e-9))))"
+    )
+    if old in src:
+        src = src.replace(old, new, 1)
+    return src
     """Яч. 18 (падеж): цикл прогноза на _PREDICT_MONTHS."""
     old_loop = (
         "for year in [2024, 2025]:\n"
@@ -1563,6 +1624,7 @@ def patch_cell_source(src: str, cfg: PipelineConfig) -> str:
     src = _patch_split_calvings_lact(src)
     src = _patch_predict_months_loops(src)
     src = _patch_cell5_predict_horizon(src)
+    src = _patch_cell5_cap_births_to_calvings(src)
     src = _patch_cell18_predict_horizon(src)
     src = _patch_cell18_division_by_zero(src)
     src = _patch_gridsearch_min_samples(src)
@@ -2790,7 +2852,7 @@ def run_pipeline(cfg: PipelineConfig) -> tuple[pd.DataFrame, pd.DataFrame]:
             if cell_id == 3:
                 inj["forecast_model1"] = ns.get("state_forecast_model1", {})
             if cell_id == 5:
-                inj["calving_forecast"] = ns.get("state_calving_scalar", {})
+                inj["calving_forecast"] = ns.get("state_forecast_model1", {})
             if cell_id == 10:
                 inj["furazh_forecast"] = ns.get("state_furazh_forecast", ns.get("state_furazh_balance", {}))
                 src = _patch_cell10_dry_fact_from_snapshot(src, cfg)
@@ -2800,7 +2862,9 @@ def run_pipeline(cfg: PipelineConfig) -> tuple[pd.DataFrame, pd.DataFrame]:
                 inj["culling_forecast"] = ns.get("state_culling", {})
                 inj["status_forecast"] = ns.get("state_status", {})
             if cell_id == 18:
-                inj["calving_forecast"] = ns.get("state_calving_scalar", {})
+                inj["calving_forecast"] = (
+                    ns.get("state_forecast_model1") or ns.get("state_calving_scalar") or {}
+                )
             if cell_id == 20:
                 inj["furazh_forecast"] = ns.get("state_furazh_balance", {})
                 src = _patch_cell20_lact_anchor_baseline(src, cfg.sep2024_baseline, train_end)
