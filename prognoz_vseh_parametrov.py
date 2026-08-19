@@ -624,10 +624,16 @@ def _patch_birth_event_rozhd(src: str) -> str:
         f"    birth_mask = {birth_isin}\n"
         "    if not birth_mask.any() and len(df) > 0:\n"
         "        _ev = df['Событие'].astype(str).str.upper().str.strip().str.replace('NAN', '', regex=False)\n"
-        "        _lact0 = pd.to_numeric(df.get('LACT', df.get('Lact', 0)), errors='coerce').fillna(0).astype(int) == 0\n"
+        "        _has_lact = 'LACT' in df.columns or 'Lact' in df.columns\n"
+        "        _lact_s = pd.to_numeric(\n"
+        "            df['LACT'] if 'LACT' in df.columns else df.get('Lact'),\n"
+        "            errors='coerce',\n"
+        "        ) if _has_lact else pd.Series(pd.NA, index=df.index)\n"
+        "        _lact0 = (_lact_s.fillna(0).astype(int) == 0) if _has_lact else pd.Series(False, index=df.index)\n"
         "        _gndr = df.get('GNDR', pd.Series('', index=df.index)).astype(str).str.upper().str.strip().isin(['F', 'M'])\n"
         "        birth_mask = _ev.isin(('ОТЕЛ', 'ОТЁЛ', 'CALVING', 'CALVED', 'ОТЕЛЕНИЕ')) & _lact0 & _gndr\n"
-        "    df = df[birth_mask].copy()"
+        "    df = df[birth_mask].copy()\n"
+        "    print(f\"  [приплод] строк рождений: {len(df)} (birth_mask sum={int(birth_mask.sum())})\")"
     )
     if birth_block_old in src:
         src = src.replace(birth_block_old, birth_block_new)
@@ -1003,6 +1009,7 @@ def _patch_cell5_cap_births_to_calvings(src: str) -> str:
         "            _h_share = min(max(_h_share, 0.35), 0.65)\n"
         "            pred_heifers = int(round(_calv_total * _h_share))\n"
         "            pred_bulls = _calv_total - pred_heifers\n"
+        "        print(f\"  [приплод] {year}-{month:02d}: calv={_calv_total}, tel={pred_heifers}, bull={pred_bulls}\")\n"
         "    else:\n"
         "        _birth_n = train_df['отелы'].sum()\n"
         "        _h_share = (train_df['телочки'].sum() / _birth_n) if _birth_n else 0.5\n"
@@ -1011,6 +1018,9 @@ def _patch_cell5_cap_births_to_calvings(src: str) -> str:
     if old in src:
         src = src.replace(old, new, 1)
     return src
+
+
+def _patch_cell18_predict_horizon(src: str) -> str:
     """Яч. 18 (падеж): цикл прогноза на _PREDICT_MONTHS."""
     old_loop = (
         "for year in [2024, 2025]:\n"
