@@ -672,6 +672,10 @@ _CALVING_EVENT_ISIN_EVENTS = (
 )
 
 
+_CALVING_COW_EVENT_ISIN_DF = (
+    "df['Событие'].astype(str).str.upper().str.strip().str.replace('NAN', '', regex=False)"
+    ".isin(('ОТЕЛ', 'ОТЁЛ', 'CALVING', 'CALVED', 'ОТЕЛЕНИЕ'))"
+)
 _CALVING_COW_EVENT_ISIN = (
     "df_events_train['Событие'].astype(str).str.upper().str.strip().str.replace('NAN', '', regex=False)"
     ".isin(('ОТЕЛ', 'ОТЁЛ', 'CALVING', 'CALVED', 'ОТЕЛЕНИЕ'))"
@@ -683,7 +687,7 @@ def _patch_calving_event_types(src: str) -> str:
     old_otel = (
         "otel_mask = df['Событие'].str.upper().str.strip().isin(['ОТЕЛ', 'ОТЁЛ', 'CALVING', 'ОТЕЛЕНИЕ'])"
     )
-    new_otel = f"otel_mask = {_CALVING_COW_EVENT_ISIN}"
+    new_otel = f"otel_mask = {_CALVING_COW_EVENT_ISIN_DF}"
     src = src.replace(old_otel, new_otel)
     src = src.replace(
         "df_calving_cows_train = df_events_train[(df_events_train['Событие'] == 'ОТЕЛ') &\n"
@@ -942,6 +946,54 @@ def _patch_cell5_predict_horizon(src: str) -> str:
     )
     if old_loop in src:
         src = src.replace(old_loop, "for year, month in _PREDICT_MONTHS:")
+    return src
+
+
+def _patch_cell18_predict_horizon(src: str) -> str:
+    """Яч. 18 (падеж): цикл прогноза на _PREDICT_MONTHS."""
+    old_loop = (
+        "for year in [2024, 2025]:\n"
+        "    start_month = 10 if year == 2024 else 1\n"
+        "    end_month = 12\n\n"
+        "    for month in range(start_month, end_month + 1):"
+    )
+    if old_loop in src:
+        src = src.replace(old_loop, "for year, month in _PREDICT_MONTHS:")
+    return src
+
+
+def _patch_cell18_division_by_zero(src: str) -> str:
+    """Яч. 18: статистика при 0 падежах / 0 отёлах."""
+    old_stats = (
+        "print(f\"\\nПрогноз на период Окт 2024 - Дек 2025 (15 месяцев):\")\n"
+        "print(f\"  Всего падежей: {total_pred_deaths}\")\n"
+        "print(f\"  Из них телочки: {total_pred_heifers} ({total_pred_heifers/total_pred_deaths*100:.1f}%)\")\n"
+        "print(f\"  Из них бычки: {total_pred_bulls} ({total_pred_bulls/total_pred_deaths*100:.1f}%)\")\n"
+        "print(f\"  Всего отелов: {total_otely}\")\n"
+        "print(f\"  Общий процент падежа: {total_pred_deaths/total_otely*100:.2f}%\")"
+    )
+    new_stats = (
+        "print(f\"\\nПрогноз на {_PREDICT_MONTHS[0][0]}-{_PREDICT_MONTHS[0][1]:02d} — "
+        "{_PREDICT_MONTHS[-1][0]}-{_PREDICT_MONTHS[-1][1]:02d} ({len(_PREDICT_MONTHS)} мес.):\")\n"
+        "print(f\"  Всего падежей: {total_pred_deaths}\")\n"
+        "if total_pred_deaths > 0:\n"
+        "    print(f\"  Из них телочки: {total_pred_heifers} ({total_pred_heifers/total_pred_deaths*100:.1f}%)\")\n"
+        "    print(f\"  Из них бычки: {total_pred_bulls} ({total_pred_bulls/total_pred_deaths*100:.1f}%)\")\n"
+        "else:\n"
+        "    print(f\"  Из них телочки: {total_pred_heifers}\")\n"
+        "    print(f\"  Из них бычки: {total_pred_bulls}\")\n"
+        "print(f\"  Всего отелов: {total_otely}\")\n"
+        "if total_otely > 0:\n"
+        "    print(f\"  Общий процент падежа: {total_pred_deaths/total_otely*100:.2f}%\")\n"
+        "else:\n"
+        "    print(\"  Общий процент падежа: n/a (нет отёлов в calving_forecast)\")"
+    )
+    if old_stats in src:
+        src = src.replace(old_stats, new_stats, 1)
+    old_rate = "    death_rate = total_deaths / otely * 100"
+    new_rate = "    death_rate = (total_deaths / otely * 100) if otely else 0.0"
+    if old_rate in src:
+        src = src.replace(old_rate, new_rate, 1)
     return src
 
 
@@ -1511,6 +1563,8 @@ def patch_cell_source(src: str, cfg: PipelineConfig) -> str:
     src = _patch_split_calvings_lact(src)
     src = _patch_predict_months_loops(src)
     src = _patch_cell5_predict_horizon(src)
+    src = _patch_cell18_predict_horizon(src)
+    src = _patch_cell18_division_by_zero(src)
     src = _patch_gridsearch_min_samples(src)
     src = _patch_cell18_empty_train(src)
     src = src.replace("n_jobs=-1", "n_jobs=1")
@@ -1874,6 +1928,12 @@ def _patch_lact_and_death_events(src: str) -> str:
         "death_mask = df['Событие'].str.upper().str.strip() == 'ПАЛА'",
         "death_mask = df['Событие'].astype(str).str.upper().str.strip().isin("
         "['ПАЛА', 'DIED', 'ПАЛ', 'DEAD', 'MORT', 'ПАДЕЖ'])",
+    )
+    src = src.replace(
+        "all_calvings = all_calvings[all_calvings['Событие'].str.upper().str.strip() == 'РОЖДЕН']",
+        "all_calvings = all_calvings["
+        "all_calvings['Событие'].astype(str).str.upper().str.strip().isin("
+        "['РОЖД', 'РОЖД.', 'РОЖДЕН', 'РОЖДЕНИЕ', 'BORN', 'BIRTH', 'CALF'])]",
     )
     src = src.replace(
         "        df = df[df['Lact'] == 0].copy()\n"
@@ -2433,7 +2493,7 @@ def after_cell_1(ns: dict[str, Any]) -> None:
 
 
 def after_cell_3(ns: dict[str, Any]) -> None:
-    fm = ns["state_forecast_model1"]
+    fm = ns.get("state_forecast_model1") or {}
     calving: dict[tuple[int, int], dict[str, int]] = {}
     for r in ns.get("results_cows", []):
         key = (r["год"], r["месяц"])
@@ -2446,9 +2506,8 @@ def after_cell_3(ns: dict[str, Any]) -> None:
 
 
 def after_cell_5(ns: dict[str, Any]) -> None:
-    fm = ns["state_forecast_model1"]
-    scalar = {k: int(v) for k, v in fm.items()}
-    ns["state_calving_scalar"] = scalar
+    fm = ns.get("state_forecast_model1") or {}
+    ns["state_calving_scalar"] = {k: int(v) for k, v in fm.items()}
     ns["state_births"] = list(ns.get("results", []))
 
 
@@ -2758,6 +2817,11 @@ def run_pipeline(cfg: PipelineConfig) -> tuple[pd.DataFrame, pd.DataFrame]:
                 detail.line(f"  Статус: ОШИБКА — {exc}")
                 detail.line(traceback.format_exc())
                 print(f"⚠️ Ячейка {cell_id} ошибка: {exc}")
+                if cell_id in (1, 3):
+                    detail.close()
+                    raise RuntimeError(
+                        f"Критическая ячейка {cell_id} ({cfg.name}): {exc}"
+                    ) from exc
                 if cell_id in (23, 25) and not cfg.forecast_only:
                     detail.close()
                     raise
