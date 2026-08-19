@@ -1020,6 +1020,36 @@ def _patch_cell5_cap_births_to_calvings(src: str) -> str:
     return src
 
 
+def _patch_cell10_balance_forecast(src: str) -> str:
+    """Яч. 10: прогноз сухостойных по балансу от якоря, не ML-средним по сезону."""
+    old = (
+        "    # Прогнозируем сухостойных\n"
+        "    pred_df = pd.DataFrame([pred_row])\n"
+        "    X_pred = pred_df[[col for col in feature_cols if col in pred_df.columns]]\n"
+        "    X_pred = X_pred.fillna(0)\n\n"
+        "    pred_suhostoynye = model.predict(X_pred)[0]\n"
+        "    pred_suhostoynye = max(0, int(round(pred_suhostoynye)))"
+    )
+    new = (
+        "    # Прогноз сухостойных — баланс: prev + запуски − отёлы коров − выбытие сухих\n"
+        "    _zap = int(round(float(monthly_avg_dry.get(month, 0))))\n"
+        "    _ot = int(round(float(monthly_avg_calving_cows.get(month, 0))))\n"
+        "    _vyb = int(round(float(monthly_avg_culling_suh.get(month, 0))))\n"
+        "    _calv_fc = calving_forecast.get((year, month))\n"
+        "    if isinstance(_calv_fc, dict):\n"
+        "        _ot = int(_calv_fc.get('коровы', _ot))\n"
+        "    elif isinstance(_calv_fc, (int, float)) and _calv_fc:\n"
+        "        _ot = int(round(float(_calv_fc)))\n"
+        "    _dry_prev = suhostoynye_prev\n"
+        "    pred_suhostoynye = max(0, int(round(_dry_prev + _zap - _ot - _vyb)))\n"
+        '    print(f"  [сухие] bal: {_dry_prev}+{_zap}-{_ot}-{_vyb}={pred_suhostoynye}")\n'
+        "    suhostoynye_prev = pred_suhostoynye"
+    )
+    if old in src:
+        src = src.replace(old, new, 1)
+    return src
+
+
 def _patch_cell18_predict_horizon(src: str) -> str:
     """Яч. 18 (падеж): цикл прогноза на _PREDICT_MONTHS."""
     old_loop = (
@@ -2865,9 +2895,11 @@ def run_pipeline(cfg: PipelineConfig) -> tuple[pd.DataFrame, pd.DataFrame]:
                 inj["calving_forecast"] = ns.get("state_forecast_model1", {})
             if cell_id == 10:
                 inj["furazh_forecast"] = ns.get("state_furazh_forecast", ns.get("state_furazh_balance", {}))
+                inj["calving_forecast"] = ns.get("state_calving_forecast", {})
                 src = _patch_cell10_dry_fact_from_snapshot(src, cfg)
                 src = _patch_cell10_dry_anchor_baseline(src, cfg.sep2024_baseline, train_end)
                 src = _patch_cell10_furazh_baseline(src, cfg.sep2024_baseline)
+                src = _patch_cell10_balance_forecast(src)
             if cell_id == 16:
                 inj["culling_forecast"] = ns.get("state_culling", {})
                 inj["status_forecast"] = ns.get("state_status", {})
